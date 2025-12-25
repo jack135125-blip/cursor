@@ -36,8 +36,8 @@ from io import BytesIO
 from openpyxl import load_workbook
 
 try:
-    import requests
-    import urllib3
+    import requests  # type: ignore
+    import urllib3  # type: ignore
     urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
     REQUESTS_AVAILABLE = True
 except ImportError:
@@ -314,11 +314,83 @@ def find_marker_row(ws_values, ws_formula, merged_lookup, marker_text, search_co
     return None
 
 
+def get_column_name(col_num, year=None):
+    """
+    열 번호를 한글 이름으로 변환
+    
+    2025/2026 시트:
+    - B열(2): 교과(군)
+    - C열(3): 과목유형
+    - D열(4): 과목명
+    - E열(5): 기본학점
+    - F열(6): 운영학점
+    - O열(15): 성적처리
+    - G~L열(7~12): 학기별 학점
+    
+    2024 시트:
+    - C열(3): 교과(군)
+    - D열(4): 과목유형
+    - E열(5): 과목명
+    - F열(6): 기본학점
+    - G열(7): 운영학점
+    - P열(16): 성적처리
+    - H~M열(8~13): 학기별 학점
+    """
+    if year == 2024:
+        # 2024 시트 열 구조
+        col_names_2024 = {
+            3: "교과(군)",
+            4: "과목유형",
+            5: "과목명",
+            6: "기본학점",
+            7: "운영학점",
+            16: "성적처리"
+        }
+        
+        # H~M 열은 학기 학점
+        if col_num in range(8, 14):  # H~M
+            return "학기학점"
+        
+        return col_names_2024.get(col_num, f"{chr(64 + col_num)}열")
+    else:
+        # 2025/2026 시트 열 구조
+        col_names = {
+            2: "교과(군)",
+            3: "과목유형",
+            4: "과목명",
+            5: "기본학점",
+            6: "운영학점",
+            15: "성적처리"
+        }
+        
+        # G~L 열은 학기 학점
+        if col_num in range(7, 13):  # G~L
+            return "학기학점"
+        
+        return col_names.get(col_num, f"{chr(64 + col_num)}열")
+
+
+def format_number(num):
+    """
+    숫자를 정수 형태로 포맷팅 (소수점 없이)
+    """
+    if num is None:
+        return "None"
+    if isinstance(num, (int, float)):
+        # 정수로 변환 가능하면 정수로 표시
+        if num == int(num):
+            return str(int(num))
+        else:
+            return str(int(num))  # 강제로 정수로 변환
+    return str(num)
+
+
 def check_all_grades_sheet(wb_v, wb_f, targets, issues):
     """
     '2026 전학년' 시트 검증
-    - 학교 지정 과목: 2026(G,H), 2025(I,J), 2024(K,L)
-    - 학생 선택 과목: 2026(G,H), 2025(J,K), 2024(L,M)
+    - 전학년 시트와 2026 입학생 시트: G, H열 비교 (1학년)
+    - 전학년 시트와 2025 입학생 시트: I, J열 비교 (2학년)
+    - 전학년 시트 K, L열과 2024 입학생 시트 L, M열 비교 (3학년)
     """
     sheetnames = wb_v.sheetnames
     all_grades_sheet = find_all_grades_sheet(sheetnames)
@@ -358,7 +430,8 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
     
     if marker_row_all:
         # '2026 전학년' 시트의 교과목 수집 (marker_row_all 위쪽)
-        all_grades_courses = {}  # {과목명_정규화: {row, B~L열, O열 값}}
+        # 화살표가 있는 과목의 경우 여러 행이 있을 수 있으므로 리스트로 저장
+        all_grades_courses = {}  # {과목명_정규화: [{row, B~L열, O열 값}, ...]}
         
         for r in range(5, marker_row_all):
             course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 4)  # D열
@@ -377,7 +450,10 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 15)  # O열
             row_data[15] = safe_strip(v)
             
-            all_grades_courses[course_norm] = row_data
+            # 같은 과목명이 여러 행에 있을 수 있음 (화살표 과목)
+            if course_norm not in all_grades_courses:
+                all_grades_courses[course_norm] = []
+            all_grades_courses[course_norm].append(row_data)
         
         # 각 입학생 시트 검증
         for year in [2026, 2025, 2024]:
@@ -405,12 +481,14 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 dst_cols = list(range(2, 13)) + [15]  # B~L, O
                 course_col = 4  # D열
             else:  # 2024
-                check_cols = [11, 12]  # K, L
+                check_cols = [12, 13]  # L, M (2024 입학생 시트)
                 src_cols = list(range(3, 14)) + [16]  # C~M, P
                 dst_cols = list(range(2, 13)) + [15]  # B~L, O (2026 전학년 기준)
                 course_col = 5  # E열 (2024는 과목명이 E열에 있음)
             
-            # 행별 검사
+            # 행별 검사 - 같은 과목명의 행 순서를 추적
+            course_row_index = {}  # {과목명: 현재 인덱스}
+            
             for r in range(5, marker_row_src):
                 course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, course_col)
                 if not course_raw or str(course_raw).strip() == "":
@@ -431,16 +509,30 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 
                 # '2026 전학년' 시트에 있는지 확인
                 if course_norm not in all_grades_courses:
+                    msg_line1 = f"'{sname}' 시트 {r}행의 '{course_norm}' 과목이 '2026 전학년' 시트에 없습니다."
+                    msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
                     issues.append({
                         "severity": "ERROR",
                         "sheet": all_grades_sheet,
                         "row": "-",
-                        "message": f"'{sname}' 시트 {r}행의 '{course_norm}' 과목이 '2026 전학년' 시트에 없습니다."
+                        "message": msg_line1 + "\n" + msg_line2
                     })
                     continue
                 
-                # 열 값 비교
-                all_data = all_grades_courses[course_norm]
+                # 같은 과목명의 몇 번째 행인지 확인 (화살표 과목 대응)
+                if course_norm not in course_row_index:
+                    course_row_index[course_norm] = 0
+                else:
+                    course_row_index[course_norm] += 1
+                
+                idx = course_row_index[course_norm]
+                all_data_list = all_grades_courses[course_norm]
+                
+                # 인덱스가 범위를 벗어나면 마지막 데이터 사용
+                if idx >= len(all_data_list):
+                    idx = len(all_data_list) - 1
+                
+                all_data = all_data_list[idx]
                 for i, src_col in enumerate(src_cols):
                     dst_col = dst_cols[i]
                     
@@ -453,26 +545,26 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                         dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
                         
                         if src_str != dst_str:
-                            col_letter_src = chr(64 + src_col)
-                            col_letter_dst = chr(64 + dst_col)
+                            src_col_name = get_column_name(src_col, year)
+                            dst_col_name = get_column_name(dst_col)  # 전학년 시트는 year 없음
                             issues.append({
                                 "severity": "ERROR",
                                 "sheet": all_grades_sheet,
                                 "row": all_data["row"],
-                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {col_letter_src}열('{src_str}')과 '2026 전학년' 시트의 {col_letter_dst}열('{dst_str}')이 일치하지 않습니다."
+                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
                             })
-                    elif src_col == 15 or dst_col == 15:  # O열 (문자열)
+                    elif src_col == 15 or dst_col == 15 or src_col == 16 or dst_col == 16:  # O열/P열 (문자열)
                         src_str = safe_strip(src_val)
                         dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
                         
                         if src_str != dst_str:
-                            col_letter_src = chr(64 + src_col)
-                            col_letter_dst = chr(64 + dst_col)
+                            src_col_name = get_column_name(src_col, year)
+                            dst_col_name = get_column_name(dst_col)  # 전학년 시트는 year 없음
                             issues.append({
                                 "severity": "ERROR",
                                 "sheet": all_grades_sheet,
                                 "row": all_data["row"],
-                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {col_letter_src}열('{src_str}')과 '2026 전학년' 시트의 {col_letter_dst}열('{dst_str}')이 일치하지 않습니다."
+                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
                             })
                     else:  # 숫자 비교
                         src_num = to_number(src_val)
@@ -480,22 +572,26 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                         
                         if src_num is not None and dst_num is not None:
                             if abs(src_num - dst_num) > EPS:
-                                col_letter_src = chr(64 + src_col)
-                                col_letter_dst = chr(64 + dst_col)
+                                src_col_name = get_column_name(src_col, year)
+                                dst_col_name = get_column_name(dst_col)  # 전학년 시트는 year 없음
+                                src_num_str = format_number(src_num)
+                                dst_num_str = format_number(dst_num)
                                 issues.append({
                                     "severity": "ERROR",
                                     "sheet": all_grades_sheet,
                                     "row": all_data["row"],
-                                    "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {col_letter_src}열({src_num:g})과 '2026 전학년' 시트의 {col_letter_dst}열({dst_num:g})이 일치하지 않습니다."
+                                    "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
                                 })
                         elif src_num is not None or dst_num is not None:
-                            col_letter_src = chr(64 + src_col)
-                            col_letter_dst = chr(64 + dst_col)
+                            src_col_name = get_column_name(src_col, year)
+                            dst_col_name = get_column_name(dst_col)  # 전학년 시트는 year 없음
+                            src_num_str = format_number(src_num)
+                            dst_num_str = format_number(dst_num)
                             issues.append({
                                 "severity": "ERROR",
                                 "sheet": all_grades_sheet,
                                 "row": all_data["row"],
-                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {col_letter_src}열({src_num})과 '2026 전학년' 시트의 {col_letter_dst}열({dst_num})이 일치하지 않습니다."
+                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
                             })
         
         # 역방향 검증: '2026 전학년' 시트에만 있고 입학생 시트에 없는 경우
@@ -558,36 +654,96 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
     
     if marker_row_student and marker_row_all:
         # '2026 전학년' 시트의 교과목 수집 (marker_row_all ~ marker_row_student 사이)
-        student_courses = {}
+        # A열 병합 구간별로 과목 수집
+        student_courses_by_year = {
+            2026: {},  # G, H열에 숫자가 있는 과목 (1학년)
+            2025: {},  # I, J열에 숫자가 있는 과목 (2학년)
+            2024: {}   # K, L열에 숫자가 있는 과목 (3학년)
+        }
+        
+        processed_merges_all = set()
         
         for r in range(marker_row_all + 1, marker_row_student):
-            course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 4)  # D열
-            if not course_raw or str(course_raw).strip() == "":
-                continue
-            
-            course_norm = normalize_course_name(course_raw)
-            if not course_norm:
-                continue
-            
-            # B~L열, O열 값 수집
-            row_data = {"row": r}
-            for col in range(2, 13):
-                v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, col)
-                row_data[col] = safe_strip(v) if col in [2, 3] else to_number(v)
-            v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 15)
-            row_data[15] = safe_strip(v)
-            
-            # A열 병합 정보 저장
-            key = (r, 2)  # B열 (교과군)
+            # A열 병합 확인 (전학년 시트는 A열 사용)
+            key = (r, 1)  # A열
             if key in merge_all:
                 min_row, _, max_row, _ = merge_all[key]
-                row_data["merge_start"] = min_row
-                row_data["merge_end"] = max_row
+                merge_key = (min_row, max_row)
             else:
-                row_data["merge_start"] = r
-                row_data["merge_end"] = r
+                merge_key = (r, r)
             
-            student_courses[course_norm] = row_data
+            if merge_key in processed_merges_all:
+                continue
+            
+            processed_merges_all.add(merge_key)
+            
+            # 해당 병합 구간에서 각 학년별로 숫자가 있는지 확인
+            has_2026 = False  # G, H열
+            has_2025 = False  # I, J열
+            has_2024 = False  # K, L열
+            
+            for rr in range(merge_key[0], merge_key[1] + 1):
+                if rr >= marker_row_student:
+                    break
+                
+                # 2026 (1학년): G, H열 (7, 8)
+                for col in [7, 8]:
+                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
+                    if to_number(v) is not None:
+                        has_2026 = True
+                        break
+                
+                # 2025 (2학년): I, J열 (9, 10)
+                for col in [9, 10]:
+                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
+                    if to_number(v) is not None:
+                        has_2025 = True
+                        break
+                
+                # 2024 (3학년): K, L열 (11, 12)
+                for col in [11, 12]:
+                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
+                    if to_number(v) is not None:
+                        has_2024 = True
+                        break
+            
+            # 해당 병합 구간의 모든 과목 수집
+            if has_2026 or has_2025 or has_2024:
+                for rr in range(merge_key[0], merge_key[1] + 1):
+                    if rr >= marker_row_student:
+                        break
+                    
+                    course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 4)  # D열
+                    if not course_raw or str(course_raw).strip() == "":
+                        continue
+                    
+                    course_norm = normalize_course_name(course_raw)
+                    if not course_norm:
+                        continue
+                    
+                    # 총계 행 같은 키워드가 포함된 경우 제외
+                    if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
+                        continue
+                    
+                    # B~L열, O열 값 수집
+                    row_data = {"row": rr}
+                    for col in range(2, 13):  # B~L열 (2~12)
+                        v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
+                        row_data[col] = safe_strip(v) if col in [2, 3] else to_number(v)
+                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 15)
+                    row_data[15] = safe_strip(v)
+                    
+                    # 병합 정보 저장
+                    row_data["merge_start"] = merge_key[0]
+                    row_data["merge_end"] = merge_key[1]
+                    
+                    # 각 학년별로 분류
+                    if has_2026:
+                        student_courses_by_year[2026][course_norm] = row_data
+                    if has_2025:
+                        student_courses_by_year[2025][course_norm] = row_data
+                    if has_2024:
+                        student_courses_by_year[2024][course_norm] = row_data
         
         # 각 입학생 시트 검증
         for year in [2026, 2025, 2024]:
@@ -609,15 +765,15 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 # 마커를 못 찾으면 시트 끝까지
                 marker_row_student_end = ws_v.max_row + 1
             
-            # 검사할 열 결정
+            # 검사할 열 결정 (입학생 시트에서 확인할 열)
             if year == 2026:
-                check_cols = [7, 8]  # G, H
+                check_cols = [7, 8]  # G, H (1학년)
                 student_course_col = 4  # D열
             elif year == 2025:
-                check_cols = [10, 11]  # J, K
+                check_cols = [9, 10]  # I, J (2학년)
                 student_course_col = 4  # D열
             else:  # 2024
-                check_cols = [12, 13]  # L, M
+                check_cols = [12, 13]  # L, M (3학년)
                 student_course_col = 5  # E열 (2024는 과목명이 E열에 있음)
             
             # A열(2026/2025) 또는 B열(2024) 병합 구간별로 과목 수집
@@ -687,15 +843,429 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                         if normalized:  # 빈 문자열이 아닌 경우만 추가
                             courses_in_merge.append(normalized)
                 
-                # '2026 전학년' 시트에 해당 과목들이 모두 있는지 확인
+                # '2026 전학년' 시트에 해당 과목들이 모두 있는지 확인 (해당 학년 열 기준)
+                # 해당 과목이 있는 행 번호 찾기
+                student_courses = student_courses_by_year.get(year, {})
+                
                 for cn in courses_in_merge:
                     if cn and cn not in student_courses:
+                        # 해당 과목의 행 번호 찾기
+                        course_row = None
+                        for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
+                            c_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, student_course_col)
+                            if c_raw and normalize_course_name(c_raw) == cn:
+                                # 해당 행의 check_cols에 숫자가 있는지 확인
+                                for col in check_cols:
+                                    v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, col)
+                                    if to_number(v) is not None:
+                                        course_row = rr
+                                        break
+                                if course_row:
+                                    break
+                        
+                        # 학년 계산: 2026 입학생 = 1학년, 2025 = 2학년, 2024 = 3학년
+                        grade = 2027 - year
+                        msg_line1 = f"'{sname}' 시트의 '{cn}' 과목이 '2026 전학년' 시트의 해당 학년({grade}학년) 열에 없습니다."
+                        msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
                         issues.append({
                             "severity": "ERROR",
                             "sheet": all_grades_sheet,
                             "row": "-",
-                            "message": f"'{sname}' 시트의 '{cn}' 과목이 '2026 전학년' 시트에 없습니다."
+                            "message": msg_line1 + "\n" + msg_line2
                         })
+    
+    # =========================
+    # 3. '2026 전학년' 시트 총계 행 합계 검증
+    # =========================
+    
+    # 데이터 범위 확인
+    first_row = 5
+    course_col = 4  # D열
+    
+    # 마지막 데이터 행 찾기
+    last_row = None
+    for rr in range(ws_all_f.max_row, first_row - 1, -1):
+        v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, course_col)
+        if v is not None and str(v).strip() != "":
+            last_row = rr
+            break
+    
+    if last_row is None:
+        issues.append({
+            "severity": "WARNING",
+            "sheet": all_grades_sheet,
+            "row": "-",
+            "message": "D열(과목)에서 데이터 행을 찾지 못했습니다."
+        })
+    else:
+        # 총계/합계 행 식별 (검사 제외 대상)
+        exempt_rows = set()
+        for rr in range(first_row, last_row + 1):
+            course_v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, course_col)
+            if course_v:
+                course_str = str(course_v).strip().replace(" ", "")
+                # 총계 관련 키워드가 있으면 제외
+                if any(keyword in course_str for keyword in [
+                    "편성학점", "총교과", "창의적체험활동", "편성학점수"
+                ]):
+                    exempt_rows.add(rr)
+        
+        # A열에서 총계 행들 찾기 (필수 셀 존재 여부 확인)
+        total_rows = {}  # {"학교지정": row, "학생선택": row, "총교과": row, "창의적": row, "편성학점수": row}
+        
+        required_cells = {
+            "학교지정": "'학교 지정 과목 교과 편성 학점'",
+            "학생선택": "'학생 선택 과목 교과 편성 학점'",
+            "총교과": "'총 교과 편성 학점'",
+            "창의적": "'창의적 체험활동 학점'",
+            "편성학점수": "'편성 학점 수'"
+        }
+        
+        for rr in range(first_row, ws_all_f.max_row + 1):
+            a_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 1)  # A열
+            if a_val:
+                a_str = str(a_val).strip().replace(" ", "")
+                
+                # 안내 문구나 긴 텍스트 제외 (실제 총계 셀은 짧고 명확함)
+                if len(a_str) > 30:  # 너무 긴 텍스트는 제외
+                    continue
+                if any(word in a_str for word in ["확인", "제대로", "다시", "주의", "주세요", "입력", "양식"]):
+                    continue
+                
+                if ("학교지정" in a_str or "학교선택" in a_str) and "편성학점" in a_str and "과목" in a_str and "교과" in a_str:
+                    total_rows["학교지정"] = rr
+                elif "학생선택" in a_str and "편성학점" in a_str and "과목" in a_str and "교과" in a_str:
+                    total_rows["학생선택"] = rr
+                elif "총교과편성학점" in a_str or ("총교과" in a_str and "편성학점" in a_str and "과목" not in a_str):
+                    total_rows["총교과"] = rr
+                elif "창의적체험활동" in a_str and "학점" in a_str and "과목" not in a_str:
+                    total_rows["창의적"] = rr
+                elif "편성학점수" in a_str and "과목" not in a_str and "교과" not in a_str:
+                    total_rows["편성학점수"] = rr
+        
+        # 필수 셀 존재 여부 확인
+        for key, cell_name in required_cells.items():
+            if key not in total_rows:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": all_grades_sheet,
+                    "row": "-",
+                    "message": f"총계 부분의 {cell_name} 셀이 존재하지 않습니다. 교육청의 양식을 확인하여 수정하고 다시 검사를 진행해주세요."
+                })
+        
+        # G~L 열 (2026 전학년 시트의 학기별 열)
+        sem_cols = list(range(7, 13))  # G~L
+        sem_cols_name = "G~L"
+        
+        # 각 행의 G~L 합 계산 (exempt_rows 제외)
+        row_total = {}
+        for rr in range(first_row, last_row + 1):
+            if rr in exempt_rows:
+                continue
+            
+            course_v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, course_col)
+            if course_v is None or str(course_v).strip() == "":
+                continue
+            
+            sem_sum = 0.0
+            any_num = False
+            for cc in sem_cols:
+                v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, cc)
+                n = to_number(v)
+                if n is not None:
+                    sem_sum += n
+                    any_num = True
+            
+            if any_num:
+                row_total[rr] = sem_sum
+        
+        # (1) 학교 지정 과목 편성 학점 검증
+        if "학교지정" in total_rows:
+            school_row = total_rows["학교지정"]
+            
+            # 학교 지정 과목: 위의 행들 합계 (first_row ~ school_row-1)
+            for col_idx, col_letter in enumerate(sem_cols):
+                expected_sum = 0.0
+                for rr in range(first_row, school_row):
+                    if rr in exempt_rows:
+                        continue
+                    val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col_letter)
+                    num = to_number(val)
+                    if num is not None:
+                        expected_sum += num
+                
+                actual_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, school_row, col_letter)
+                actual_num = to_number(actual_val)
+                
+                if actual_num is not None and abs(actual_num - expected_sum) > EPS:
+                    col_name = chr(64 + col_letter)  # 열 번호를 문자로 변환
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": all_grades_sheet,
+                        "row": school_row,
+                        "message": f"학교 지정 과목 편성 학점 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값={expected_sum:g}"
+                    })
+        
+        # (2) 학생 선택 과목 편성 학점 검증
+        if "학생선택" in total_rows and "학교지정" in total_rows:
+            student_row = total_rows["학생선택"]
+            school_row = total_rows["학교지정"]
+            
+            # 학생 선택 과목: school_row+1 ~ student_row-1 합계 (증배 제외)
+            for col_idx, col_letter in enumerate(sem_cols):
+                expected_sum = 0.0
+                for rr in range(school_row + 1, student_row):
+                    if rr in exempt_rows:
+                        continue
+                    
+                    # 증배 확인 (A열)
+                    a_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 1)
+                    if a_val and "증배" in str(a_val):
+                        continue
+                    
+                    val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col_letter)
+                    num = to_number(val)
+                    if num is not None:
+                        expected_sum += num
+                
+                actual_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, student_row, col_letter)
+                actual_num = to_number(actual_val)
+                
+                if actual_num is not None and abs(actual_num - expected_sum) > EPS:
+                    col_name = chr(64 + col_letter)
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": all_grades_sheet,
+                        "row": student_row,
+                        "message": f"학생 선택 과목 편성 학점 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값={expected_sum:g} (증배 제외)"
+                    })
+        
+        # (3) 총 교과 편성 학점 검증
+        if "총교과" in total_rows and "학교지정" in total_rows and "학생선택" in total_rows:
+            total_course_row = total_rows["총교과"]
+            school_row = total_rows["학교지정"]
+            student_row = total_rows["학생선택"]
+            
+            # 각 열별로 학교 지정과 학생 선택의 기댓값을 저장
+            school_expected_all = {}
+            student_expected_all = {}
+            
+            # 학교 지정 과목 기댓값 계산
+            for col_letter in sem_cols:
+                expected_sum = 0.0
+                for rr in range(first_row, school_row):
+                    if rr in exempt_rows:
+                        continue
+                    val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col_letter)
+                    num = to_number(val)
+                    if num is not None:
+                        expected_sum += num
+                school_expected_all[col_letter] = expected_sum
+            
+            # 학생 선택 과목 기댓값 계산 (증배 제외)
+            for col_letter in sem_cols:
+                expected_sum = 0.0
+                for rr in range(school_row + 1, student_row):
+                    if rr in exempt_rows:
+                        continue
+                    
+                    # 증배 확인 (A열)
+                    a_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 1)
+                    if a_val and "증배" in str(a_val):
+                        continue
+                    
+                    val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col_letter)
+                    num = to_number(val)
+                    if num is not None:
+                        expected_sum += num
+                student_expected_all[col_letter] = expected_sum
+            
+            # 총 교과 = 학교 지정 기댓값 + 학생 선택 기댓값
+            for col_letter in sem_cols:
+                expected_sum = school_expected_all.get(col_letter, 0.0) + student_expected_all.get(col_letter, 0.0)
+                
+                actual_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, total_course_row, col_letter)
+                actual_num = to_number(actual_val)
+                
+                if actual_num is not None and abs(actual_num - expected_sum) > EPS:
+                    col_name = chr(64 + col_letter)
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": all_grades_sheet,
+                        "row": total_course_row,
+                        "message": f"총 교과 편성 학점 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값(학교지정+학생선택)={expected_sum:g}"
+                    })
+        
+        # (4) 편성 학점 수 검증
+        if "편성학점수" in total_rows and "학교지정" in total_rows and "학생선택" in total_rows:
+            final_row = total_rows["편성학점수"]
+            school_row = total_rows["학교지정"]
+            student_row = total_rows["학생선택"]
+            
+            # 학교 지정과 학생 선택의 기댓값이 이미 위에서 계산되었는지 확인
+            # 만약 총교과 검증을 거치지 않았다면 여기서 계산
+            if 'school_expected_all' not in locals() or 'student_expected_all' not in locals():
+                school_expected_all = {}
+                student_expected_all = {}
+                
+                # 학교 지정 과목 기댓값 계산
+                for col_letter in sem_cols:
+                    expected_sum = 0.0
+                    for rr in range(first_row, school_row):
+                        if rr in exempt_rows:
+                            continue
+                        val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col_letter)
+                        num = to_number(val)
+                        if num is not None:
+                            expected_sum += num
+                    school_expected_all[col_letter] = expected_sum
+                
+                # 학생 선택 과목 기댓값 계산 (증배 제외)
+                for col_letter in sem_cols:
+                    expected_sum = 0.0
+                    for rr in range(school_row + 1, student_row):
+                        if rr in exempt_rows:
+                            continue
+                        
+                        # 증배 확인 (A열)
+                        a_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 1)
+                        if a_val and "증배" in str(a_val):
+                            continue
+                        
+                        val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col_letter)
+                        num = to_number(val)
+                        if num is not None:
+                            expected_sum += num
+                    student_expected_all[col_letter] = expected_sum
+            
+            # 편성 학점 수 = 총 교과 기댓값 + 창의적(3)
+            for col_letter in sem_cols:
+                total_expected = school_expected_all.get(col_letter, 0.0) + student_expected_all.get(col_letter, 0.0)
+                expected_sum = total_expected + 3.0
+                
+                actual_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, final_row, col_letter)
+                actual_num = to_number(actual_val)
+                
+                if actual_num is not None and abs(actual_num - expected_sum) > EPS:
+                    col_name = chr(64 + col_letter)
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": all_grades_sheet,
+                        "row": final_row,
+                        "message": f"편성 학점 수 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값(총교과+창의적)={expected_sum:g}"
+                    })
+
+
+def check_school_name_consistency(wb_v, wb_f, targets, issues):
+    """
+    모든 시트의 2행에서 학교명이 올바르게 입력되었는지 확인
+    - 'OO고등학교'로 되어 있으면 오류
+    - 괄호 안에 공립/국립/사립 중 하나만 있어야 함
+    - 모든 시트가 동일한 학교명을 가져야 함
+    """
+    sheetnames = wb_v.sheetnames
+    all_grades_sheet = find_all_grades_sheet(sheetnames)
+    
+    # 검사할 시트 목록 (입학생 시트 + 전학년 시트)
+    sheets_to_check = []
+    for year, sname in targets.items():
+        if sname:
+            sheets_to_check.append(sname)
+    if all_grades_sheet:
+        sheets_to_check.append(all_grades_sheet)
+    
+    if not sheets_to_check:
+        return
+    
+    school_names = {}  # {시트명: 학교명}
+    
+    for sname in sheets_to_check:
+        ws_v = wb_v[sname]
+        ws_f = wb_f[sname]
+        merge_lookup = build_merged_lookup(ws_f)
+        
+        # 2행의 학교명 찾기 (보통 병합된 셀에 있음)
+        school_name = None
+        for col in range(1, ws_f.max_column + 1):
+            val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, 2, col)
+            if val and isinstance(val, str):
+                val_str = str(val).strip()
+                # 학교명으로 추정되는 패턴: "고등학교" 포함
+                if "고등학교" in val_str or "학년도" in val_str:
+                    school_name = val_str
+                    break
+        
+        if not school_name:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": 2,
+                "message": "2행에서 학교명을 찾을 수 없습니다. 학교명이 올바르게 입력되었는지 확인해주세요."
+            })
+            continue
+        
+        school_names[sname] = school_name
+        
+        # 1. 'OO고등학교' 패턴 체크
+        if "OO고등학교" in school_name or "○○고등학교" in school_name or "○○ 고등학교" in school_name or "OO 고등학교" in school_name:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": 2,
+                "message": f"학교명이 'OO고등학교'로 되어 있습니다. 실제 학교명으로 수정해주세요. (현재: {school_name})"
+            })
+            continue
+        
+        # 2. 괄호 안 학교 유형 체크
+        import re
+        # 괄호 안의 내용 추출
+        bracket_pattern = r'\((.*?)\)'
+        brackets = re.findall(bracket_pattern, school_name)
+        
+        valid_types = ["공립", "국립", "사립"]
+        
+        if brackets:
+            # 괄호 내용 확인
+            bracket_content = brackets[0].strip()
+            
+            # 여러 단어가 있거나, 유효한 유형이 아닌 경우
+            if bracket_content not in valid_types:
+                # "공립/국립/사립" 같은 형태인지 확인
+                if "/" in bracket_content or "," in bracket_content or " " in bracket_content:
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": sname,
+                        "row": 2,
+                        "message": f"괄호 안에 공립, 국립, 사립 중 하나만 적어야 합니다. (현재: {school_name})"
+                    })
+                elif bracket_content not in valid_types:
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": sname,
+                        "row": 2,
+                        "message": f"괄호 안에 '공립', '국립', '사립' 중 하나를 적어야 합니다. (현재: {school_name})"
+                    })
+        else:
+            # 괄호가 없는 경우
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": 2,
+                "message": f"학교명 뒤에 괄호와 함께 공립/국립/사립을 표기해야 합니다. (현재: {school_name})"
+            })
+    
+    # 3. 모든 시트의 학교명이 동일한지 확인
+    if len(school_names) > 1:
+        unique_names = set(school_names.values())
+        if len(unique_names) > 1:
+            # 학교명이 다른 시트들 찾기
+            name_list = "\n".join([f"  • {sname}: {name}" for sname, name in school_names.items()])
+            issues.append({
+                "severity": "ERROR",
+                "sheet": "-",
+                "row": 2,
+                "message": f"시트마다 학교명이 다릅니다. 모든 시트에 동일한 학교명을 입력해주세요.\n\n[각 시트의 학교명]\n{name_list}"
+            })
 
 
 def run_checks(xlsx_path: str):
@@ -845,6 +1415,34 @@ def run_checks(xlsx_path: str):
     
     summary["vocational_sheet"] = vocational_sheet_name
     summary["vocational_course_count"] = len(vocational_courses)
+    
+    # 신설교과 시트 로드 (있으면)
+    new_courses = set()
+    new_course_sheet_name = None
+    
+    for sname in ref_sheetnames:
+        if "신설교과" in sname:
+            new_course_sheet_name = sname
+            break
+    
+    if new_course_sheet_name:
+        try:
+            ws_new_v = ref_wb_v[new_course_sheet_name]
+            ws_new_f = ref_wb_f[new_course_sheet_name]
+            new_merge = build_merged_lookup(ws_new_f)
+            
+            # B열에서 과목명 읽기 (헤더 행은 1~3 사이로 가정, 데이터는 그 이후부터)
+            for rr in range(2, ws_new_f.max_row + 1):
+                course_v, _, _ = get_value_with_merge(ws_new_v, ws_new_f, new_merge, rr, 2)  # B열
+                if course_v and str(course_v).strip():
+                    course_normalized = normalize_course_name(course_v)
+                    if course_normalized:
+                        new_courses.add(course_normalized)
+        except Exception:
+            pass  # 신설교과 시트 로드 실패 시 무시
+    
+    summary["new_course_sheet"] = new_course_sheet_name
+    summary["new_course_count"] = len(new_courses)
 
     # 시트가 없다면 여기서 종료
     if any(v is None for v in targets.values()):
@@ -985,17 +1583,32 @@ def run_checks(xlsx_path: str):
                         missing_not_in_vocational = [m for m in missing if m not in vocational_courses]
                         missing_in_vocational = [m for m in missing if m in vocational_courses]
                         
+                        # 신설교과에서 확인
+                        missing_not_in_new = [m for m in missing_not_in_vocational if m not in new_courses]
+                        missing_in_new = [m for m in missing_not_in_vocational if m in new_courses]
+                        
                         if missing_in_vocational:
                             issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"일반고에서 전문교과의 경우는 진로로 편성할 수 있습니다. (과목명: {', '.join(missing_in_vocational)})"})
                         
-                        if missing_not_in_vocational:
+                        if missing_in_new:
+                            for new_course in missing_in_new:
+                                msg_line1 = f"'{new_course}'은(는) 교육과정에 표시되지 않은 교과목 중 신설 승인이 된 과목입니다."
+                                msg_line2 = "      각 학교에서 해당 교과목을 편성하기 위해서는 교육청에 사용 승인을 받아야 합니다."
+                                issues.append({
+                                    "severity": "CHECK", 
+                                    "sheet": sname, 
+                                    "row": rr, 
+                                    "message": msg_line1 + "\n" + msg_line2
+                                })
+                        
+                        if missing_not_in_new:
                             hints = []
-                            for m in missing_not_in_vocational:
+                            for m in missing_not_in_new:
                                 close = difflib.get_close_matches(m, hidden_list_norm, n=1, cutoff=0.6)
                                 if close:
                                     hints.append(f"{m}→{close[0]}")
                             hint_txt = f" (유사 후보: {', '.join(hints)})" if hints else ""
-                            issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"↔ 과목명 중 지침에 없는 항목: {', '.join(missing_not_in_vocational)}{hint_txt}"})
+                            issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"↔ 과목명 중 지침에 없는 항목: {', '.join(missing_not_in_new)}{hint_txt}"})
                     
                     # ↔ 과목도 병합 셀 위치에 따라 좌/우 과목으로 검증
                     # 병합 셀의 top-left 행이면 왼쪽 과목, 아니면 오른쪽 과목
@@ -1052,6 +1665,10 @@ def run_checks(xlsx_path: str):
                         # 전문교과목록 시트에서 확인
                         if course_norm in vocational_courses:
                             issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"일반고에서 전문교과의 경우는 진로로 편성할 수 있습니다. (과목명: '{course_norm}')"})
+                            hidden_rec = None
+                        # 신설교과 시트에서 확인
+                        elif course_norm in new_courses:
+                            issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"'{course_norm}'은(는) 교육과정에 표시되지 않은 교과목 중 신설 승인이 된 과목입니다. 각 학교에서 해당 교과목을 편성하기 위해서는 교육청에 사용 승인을 받아야 합니다."})
                             hidden_rec = None
                         else:
                             hint = ""
@@ -1112,11 +1729,7 @@ def run_checks(xlsx_path: str):
                         issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"기본학점(E{rr})이 숫자가 아닙니다: {basic_v}"})
                 else:
                     if hidden_rec["basic"] is not None and abs(basic_n - hidden_rec["basic"]) > EPS:
-                        # 숨김 시트 I열에 특수 사항이 있는지 확인
-                        if hidden_rec.get("special_note") and hidden_rec["special_note"] != "":
-                            issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"기본학점 불일치: 시트={basic_n:g} / 지침={hidden_rec['basic']:g}. 일반고에서 진로 선택으로 개설할 수 있는 과목. 이상없으면 무시"})
-                        else:
-                            issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"기본학점 불일치: 시트={basic_n:g} / 지침={hidden_rec['basic']:g}"})
+                        issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"기본학점 불일치: 시트={basic_n:g} / 지침={hidden_rec['basic']:g}"})
 
                 grade_v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, grading_col)
                 grade_s = safe_strip(grade_v)
@@ -1361,24 +1974,51 @@ def run_checks(xlsx_path: str):
         # (8) 총계 행 합계 검증
         # =========================
         
-        # 총계 행들 찾기
+        # A열(2025/2026) 또는 B열(2024)에서 총계 행들 찾기 (필수 셀 존재 여부 확인)
         total_rows = {}  # {"학교지정": row, "학생선택": row, "총교과": row, "창의적": row, "편성학점수": row}
         
+        required_cells = {
+            "학교지정": "'학교 지정 과목 교과 편성 학점'",
+            "학생선택": "'학생 선택 과목 교과 편성 학점'",
+            "총교과": "'총 교과 편성 학점'",
+            "창의적": "'창의적 체험활동 학점'",
+            "편성학점수": "'편성 학점 수'"
+        }
+        
+        # A열(2025/2026) 또는 B열(2024) 확인
+        check_col = 1 if year in [2025, 2026] else 2
+        
         for rr in range(first_row, ws_f.max_row + 1):
-            d_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, course_col)
-            if d_val:
-                d_str = str(d_val).strip().replace(" ", "")
+            col_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, check_col)
+            if col_val:
+                col_str = str(col_val).strip().replace(" ", "")
                 
-                if "학교지정" in d_str and "편성학점" in d_str:
+                # 안내 문구나 긴 텍스트 제외 (실제 총계 셀은 짧고 명확함)
+                if len(col_str) > 30:  # 너무 긴 텍스트는 제외
+                    continue
+                if any(word in col_str for word in ["확인", "제대로", "다시", "주의", "주세요", "입력", "양식"]):
+                    continue
+                
+                if ("학교지정" in col_str or "학교선택" in col_str) and "편성학점" in col_str and "과목" in col_str and "교과" in col_str:
                     total_rows["학교지정"] = rr
-                elif "학생선택" in d_str and "편성학점" in d_str:
+                elif "학생선택" in col_str and "편성학점" in col_str and "과목" in col_str and "교과" in col_str:
                     total_rows["학생선택"] = rr
-                elif "총교과편성" in d_str or ("총교과" in d_str and "편성학점" in d_str):
+                elif "총교과편성학점" in col_str or ("총교과" in col_str and "편성학점" in col_str and "과목" not in col_str):
                     total_rows["총교과"] = rr
-                elif "창의적체험활동" in d_str:
+                elif "창의적체험활동" in col_str and "학점" in col_str and "과목" not in col_str:
                     total_rows["창의적"] = rr
-                elif "편성학점수" in d_str:
+                elif "편성학점수" in col_str and "과목" not in col_str and "교과" not in col_str:
                     total_rows["편성학점수"] = rr
+        
+        # 필수 셀 존재 여부 확인
+        for key, cell_name in required_cells.items():
+            if key not in total_rows:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": "-",
+                    "message": f"총계 부분의 {cell_name} 셀이 존재하지 않습니다. 교육청의 양식을 확인하여 수정하고 다시 검사를 진행해주세요."
+                })
         
         # 총계 행 검증
         if "학교지정" in total_rows:
@@ -1489,14 +2129,43 @@ def run_checks(xlsx_path: str):
             school_row = total_rows["학교지정"]
             student_row = total_rows["학생선택"]
             
-            for col_idx, col_letter in enumerate(sem_cols):
-                # 학교 지정 + 학생 선택
-                school_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, school_row, col_letter)
-                student_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, student_row, col_letter)
-                
-                school_num = to_number(school_val) or 0.0
-                student_num = to_number(student_val) or 0.0
-                expected_sum = school_num + student_num
+            # 각 열별로 학교 지정과 학생 선택의 기댓값을 저장
+            school_expected = {}
+            student_expected = {}
+            
+            # 학교 지정 과목 기댓값 계산
+            for col_letter in sem_cols:
+                expected_sum = 0.0
+                for rr in range(first_row, school_row):
+                    if rr in exempt_rows:
+                        continue
+                    val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col_letter)
+                    num = to_number(val)
+                    if num is not None:
+                        expected_sum += num
+                school_expected[col_letter] = expected_sum
+            
+            # 학생 선택 과목 기댓값 계산
+            for col_letter in sem_cols:
+                expected_sum = 0.0
+                for rr in range(school_row + 1, student_row):
+                    if rr in exempt_rows:
+                        continue
+                    
+                    # 증배 확인
+                    a_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, compare_col)
+                    if a_val and "증배" in str(a_val):
+                        continue
+                    
+                    val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col_letter)
+                    num = to_number(val)
+                    if num is not None:
+                        expected_sum += num
+                student_expected[col_letter] = expected_sum
+            
+            # 총 교과 = 학교 지정 기댓값 + 학생 선택 기댓값
+            for col_letter in sem_cols:
+                expected_sum = school_expected.get(col_letter, 0.0) + student_expected.get(col_letter, 0.0)
                 
                 actual_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, total_subject_row, col_letter)
                 actual_num = to_number(actual_val)
@@ -1510,25 +2179,20 @@ def run_checks(xlsx_path: str):
                         "message": f"총 교과 편성 학점 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값(학교지정+학생선택)={expected_sum:g}"
                     })
             
-            # M/N열 합계
-            sem_sum = 0.0
-            for col_letter in sem_cols:
-                val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, total_subject_row, col_letter)
-                num = to_number(val)
-                if num is not None:
-                    sem_sum += num
+            # M/N열 합계 = 각 열의 총 교과 기댓값 합
+            expected_total = sum(school_expected.get(col, 0.0) + student_expected.get(col, 0.0) for col in sem_cols)
             
             total_col = total_cols[0]
             actual_total, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, total_subject_row, total_col)
             actual_total_num = to_number(actual_total)
             
-            if actual_total_num is not None and abs(actual_total_num - sem_sum) > EPS:
+            if actual_total_num is not None and abs(actual_total_num - expected_total) > EPS:
                 total_col_name = chr(64 + total_col)
                 issues.append({
                     "severity": "ERROR",
                     "sheet": sname,
                     "row": total_subject_row,
-                    "message": f"총 교과 편성 학점 {total_col_name}열 합계 오류: 셀값={actual_total_num:g}, 기대값={sem_sum:g}"
+                    "message": f"총 교과 편성 학점 {total_col_name}열 합계 오류: 셀값={actual_total_num:g}, 기대값={expected_total:g}"
                 })
         
         # 창의적 체험활동 검증
@@ -1564,19 +2228,51 @@ def run_checks(xlsx_path: str):
                 })
         
         # 편성 학점 수 검증
-        if "편성학점수" in total_rows and "총교과" in total_rows and "창의적" in total_rows:
+        if "편성학점수" in total_rows and "학교지정" in total_rows and "학생선택" in total_rows:
             final_row = total_rows["편성학점수"]
-            total_subject_row = total_rows["총교과"]
-            creative_row = total_rows["창의적"]
+            school_row = total_rows["학교지정"]
+            student_row = total_rows["학생선택"]
+            
+            # 학교 지정과 학생 선택의 기댓값이 이미 위에서 계산되었는지 확인
+            # 만약 총교과 검증을 거치지 않았다면 여기서 계산
+            if 'school_expected' not in locals() or 'student_expected' not in locals():
+                school_expected = {}
+                student_expected = {}
+                
+                # 학교 지정 과목 기댓값 계산
+                for col_letter in sem_cols:
+                    expected_sum = 0.0
+                    for rr in range(first_row, school_row):
+                        if rr in exempt_rows:
+                            continue
+                        val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col_letter)
+                        num = to_number(val)
+                        if num is not None:
+                            expected_sum += num
+                    school_expected[col_letter] = expected_sum
+                
+                # 학생 선택 과목 기댓값 계산
+                for col_letter in sem_cols:
+                    expected_sum = 0.0
+                    for rr in range(school_row + 1, student_row):
+                        if rr in exempt_rows:
+                            continue
+                        
+                        # 증배 확인
+                        a_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, compare_col)
+                        if a_val and "증배" in str(a_val):
+                            continue
+                        
+                        val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col_letter)
+                        num = to_number(val)
+                        if num is not None:
+                            expected_sum += num
+                    student_expected[col_letter] = expected_sum
             
             for col_idx, col_letter in enumerate(sem_cols):
-                # 총교과 + 창의적
-                total_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, total_subject_row, col_letter)
-                creative_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, creative_row, col_letter)
-                
-                total_num = to_number(total_val) or 0.0
-                creative_num = to_number(creative_val) or 0.0
-                expected_sum = total_num + creative_num
+                # 총교과 기댓값 + 창의적(3)
+                total_expected = school_expected.get(col_letter, 0.0) + student_expected.get(col_letter, 0.0)
+                expected_sum = total_expected + 3.0
                 
                 actual_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, final_row, col_letter)
                 actual_num = to_number(actual_val)
@@ -1590,34 +2286,34 @@ def run_checks(xlsx_path: str):
                         "message": f"편성 학점 수 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값(총교과+창의적)={expected_sum:g}"
                     })
             
-            # M/N열 합계 체크
+            # M/N열 합계 체크 = 총 교과 기댓값 합 + 창의적(18)
             total_col = total_cols[0]
             actual_final, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, final_row, total_col)
             actual_final_num = to_number(actual_final)
             
-            # G~L 합계 (또는 H~M)
-            sem_sum = 0.0
-            for col_letter in sem_cols:
-                val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, final_row, col_letter)
-                num = to_number(val)
-                if num is not None:
-                    sem_sum += num
+            # 기댓값 = 각 열의 (학교지정 + 학생선택) 합 + 18
+            expected_final_total = sum(school_expected.get(col, 0.0) + student_expected.get(col, 0.0) for col in sem_cols) + 18.0
             
             if actual_final_num is not None:
                 # 합계 체크
-                if abs(actual_final_num - sem_sum) > EPS:
+                if abs(actual_final_num - expected_final_total) > EPS:
                     total_col_name = chr(64 + total_col)
                     issues.append({
                         "severity": "ERROR",
                         "sheet": sname,
                         "row": final_row,
-                        "                        message": f"편성 학점 수 {total_col_name}열 합계 오류: 셀값={actual_final_num:g}, 기대값={sem_sum:g}"
+                        "message": f"편성 학점 수 {total_col_name}열 합계 오류: 셀값={actual_final_num:g}, 기대값(총교과+창의적)={expected_final_total:g}"
                     })
 
     # =========================
     # (9) 2026 전학년 시트 검증
     # =========================
     check_all_grades_sheet(wb_v, wb_f, targets, issues)
+
+    # =========================
+    # (10) 학교명 일관성 검증
+    # =========================
+    check_school_name_consistency(wb_v, wb_f, targets, issues)
 
     return issues, summary
 
@@ -1703,6 +2399,16 @@ class App:
             style="Muted.TLabel"
         ).pack(side="left")
         
+        # 두 번째 줄 텍스트
+        text_frame2 = ttk.Frame(header)
+        text_frame2.pack(fill="x", pady=(2, 0))
+        
+        ttk.Label(
+            text_frame2,
+            text="프로그램이 잘못 판단할 수 있으니, 확인했을 때 이상이 없다면 오류를 무시하셔도 됩니다.",
+            style="Muted.TLabel"
+        ).pack(anchor="w")
+
         download_btn = tk.Button(
             text_frame,
             text="편성표 양식 다운로드",
@@ -1963,19 +2669,32 @@ class App:
                 row_n = 10**9
             return (sev_rank.get(x.get("severity", "INFO"), 9), row_n)
 
-        # 2024 시트 확인
+        # 2024 시트 및 2026 전학년 시트 확인
         targets = summary.get("targets") or {}
         sheet_2024 = targets.get(2024)
+        # 모든 시트 이름 목록 생성 (groups에 있는 시트 + text_widgets에 있는 시트)
+        all_sheet_names = set(groups.keys()) | set(self.text_widgets.keys())
+        all_grades_sheet = find_all_grades_sheet(list(all_sheet_names))
+        
+        # 먼저 모든 시트에 안내 메시지 출력 (오류가 없어도 출력)
+        for tab_name in self.text_widgets.keys():
+            if tab_name == "전체" or tab_name == "기타":
+                continue
+            
+            # 2024 시트인 경우 안내 메시지 출력
+            if tab_name == sheet_2024 and sheet_2024:
+                self._w(tab_name, "[안내]\n", "HEADER")
+                self._w(tab_name, "2015개정 교육과정의 과목명의 경우는 일치 여부를 확인하지 않습니다.\n", "INFO")
+                self._w(tab_name, "지침의 표를 확인하고 정확하게 입력해주세요.\n\n", "INFO")
+            
+            # 2026 전학년 시트인 경우 안내 메시지 출력
+            if tab_name == all_grades_sheet and all_grades_sheet:
+                self._w(tab_name, "[안내]\n", "HEADER")
+                self._w(tab_name, "개설 여부는 프로그램 상 확인 절차가 따로 없습니다.\n\n", "INFO")
 
         # 각 시트 탭에 출력
         for sheet, items in groups.items():
             tab = sheet if sheet in self.text_widgets else "기타"
-            
-            # 2024 시트인 경우 안내 메시지 출력
-            if sheet == sheet_2024 and sheet_2024:
-                self._w(tab, "[안내]\n", "HEADER")
-                self._w(tab, "2015개정 교육과정의 과목명의 경우는 일치 여부를 확인하지 않습니다.\n", "INFO")
-                self._w(tab, "지침의 표를 확인하고 정확하게 입력해주세요.\n\n", "INFO")
             
             # 행 번호별로 그룹핑
             row_groups = {}
@@ -2096,7 +2815,7 @@ class App:
                     for source_sheet in sorted(sheet_groups.keys()):
                         data = sheet_groups[source_sheet]
                         
-                        self._w(tab, f"\n▶ '{source_sheet}'에서 '2026 전학년' 시트에 없는 과목\n", "COURSE")
+                        self._w(tab, f"\n▶ '{source_sheet}'에 있지만, '2026 전학년' 시트에 없는 과목\n", "COURSE")
                         self._w(tab, "─" * 80 + "\n", "INFO")
                         
                         # 행 번호 있는 것들
@@ -2118,8 +2837,19 @@ class App:
                         for it in other_items:
                             sev = it.get("severity", "INFO")
                             msg = it.get("message", "")
-                            self._w(tab, f"  [{sev}] {msg}\n", 
-                                   sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                            
+                            # 메시지에 줄바꿈이 있으면 첫 줄만 severity 표시, 나머지는 들여쓰기
+                            lines = msg.split('\n')
+                            if len(lines) > 1:
+                                self._w(tab, f"  [{sev}] {lines[0]}\n", 
+                                       sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                                for line in lines[1:]:
+                                    if line.strip():  # 빈 줄이 아닌 경우만 출력
+                                        self._w(tab, f"      {line}\n", 
+                                               sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                            else:
+                                self._w(tab, f"  [{sev}] {msg}\n", 
+                                       sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
                 else:
                     if row_label:
                         self._w(tab, f"\n▶ {row_num}행 - {row_label}\n", "COURSE")
@@ -2131,8 +2861,18 @@ class App:
                         sev = it.get("severity", "INFO")
                         msg = it.get("message", "")
                         
-                        self._w(tab, f"  [{sev}] {msg}\n", 
-                               sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                        # 메시지에 줄바꿈이 있으면 첫 줄만 severity 표시, 나머지는 들여쓰기
+                        lines = msg.split('\n')
+                        if len(lines) > 1:
+                            self._w(tab, f"  [{sev}] {lines[0]}\n", 
+                                   sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                            for line in lines[1:]:
+                                if line.strip():  # 빈 줄이 아닌 경우만 출력
+                                    self._w(tab, f"      {line}\n", 
+                                           sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                        else:
+                            self._w(tab, f"  [{sev}] {msg}\n", 
+                                   sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
 
             err_cnt = sum(1 for x in items if x.get("severity") == "ERROR")
             warn_cnt = sum(1 for x in items if x.get("severity") == "WARNING")
@@ -2140,6 +2880,14 @@ class App:
             self._w(tab, "\n" + "=" * 80 + "\n", "INFO")
             self._w(tab, f"[전체 요약] 오류 {err_cnt}건, 경고 {warn_cnt}건, 확인 {check_cnt}건\n", "HEADER")
 
+        # 오류가 없는 시트에 메시지 출력
+        for tab_name in self.text_widgets.keys():
+            if tab_name == "전체":
+                continue
+            # 해당 시트에 이슈가 없으면 메시지 출력
+            if tab_name not in groups:
+                self._w(tab_name, "발견된 오류가 없습니다.\n", "HEADER")
+        
         # 전체 탭에도 전체 지침 간단 요약(원하면 제거 가능)
         self._w("전체", "[전체 문제 요약(시트별)]\n", "HEADER")
         for sheet, items in sorted(groups.items(), key=lambda kv: kv[0]):

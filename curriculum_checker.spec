@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
-    ['curriculum_checker_12.24_학교에서 작업.py'],
+    ['curriculum_checker_12.25_집에서 작업.py'],
     pathex=[],
     binaries=[],
     datas=[],
@@ -34,6 +34,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon='curriculum_checker_icon.ico',
 )
 
 

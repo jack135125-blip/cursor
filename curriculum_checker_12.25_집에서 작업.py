@@ -2964,6 +2964,12 @@ class App:
                 row = it.get("row", "-")
                 row_groups.setdefault(row, []).append(it)
             
+            # 시트당 오류가 50개가 넘으면 안내 문구 표시
+            total_errors = len(items)
+            if total_errors > 50:
+                self._w(tab, "[경고]\n", "HEADER")
+                self._w(tab, "양식이 교육청 양식 파일에 따라 바르게 되어 있는 지 확인해주세요.\n\n", "WARNING")
+            
             self._w(tab, "[문제 목록]\n", "HEADER")
             
             # 엑셀 파일에서 행 정보를 읽어오기 위한 준비

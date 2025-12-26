@@ -1876,51 +1876,68 @@ def run_checks(xlsx_path: str):
                     # 병합 셀의 top-left 행이면 왼쪽 과목, 아니면 오른쪽 과목
                     key = (rr, course_col)
                     if key in merge_lookup:
-                        min_row, min_col, _, _ = merge_lookup[key]
-                        if rr == min_row:
-                            # 병합 영역의 첫 행 -> 왼쪽 과목
-                            target_course = parts[0] if len(parts) > 0 else None
-                        else:
-                            # 병합 영역의 두 번째 행 이후 -> 오른쪽 과목
-                            target_course = parts[1] if len(parts) > 1 else None
-                        
-                        if target_course and target_course in hidden:
-                            hidden_rec = hidden[target_course]
-                            
-                            # 교과(군) 비교 (2025/2026만, '증배' 제외)
-                            if hidden_rec and year in (2025, 2026):
-                                sheet_subject_group, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, subject_group_col)
-                                sheet_subject_group_str = safe_strip(sheet_subject_group)
-                                hidden_subject_group_str = hidden_rec.get("subject_group", "")
-                                
-                                # '증배'가 포함된 경우 교과(군) 체크 제외
-                                if "증배" not in sheet_subject_group_str:
-                                    # 교과(군)이 비어있는 경우
-                                    if not sheet_subject_group_str:
-                                        issues.append({
-                                            "severity": "ERROR", 
-                                            "sheet": sname, 
-                                            "row": rr, 
-                                            "message": f"교과(군)(B열)이 비어 있습니다. (지침: '{hidden_subject_group_str}')"
-                                        })
-                                    elif not hidden_subject_group_str:
-                                        issues.append({
-                                            "severity": "WARNING", 
-                                            "sheet": sname, 
-                                            "row": rr, 
-                                            "message": f"지침에 교과(군) 정보가 없습니다. (시트: '{sheet_subject_group_str}')"
-                                        })
-                                    elif sheet_subject_group_str != hidden_subject_group_str:
-                                        issues.append({
-                                            "severity": "ERROR", 
-                                            "sheet": sname, 
-                                            "row": rr, 
-                                            "message": f"교과(군) 불일치: 시트(B열)='{sheet_subject_group_str}' / 지침(A열)='{hidden_subject_group_str}'"
-                                        })
-                        else:
+                        min_row, min_col, max_row, max_col = merge_lookup[key]
+                        # 병합이 2행 이상인지 확인
+                        if max_row - min_row < 1:
+                            # 병합이 1행만인 경우 (실제로는 병합이 아님)
+                            issues.append({
+                                "severity": "ERROR",
+                                "sheet": sname,
+                                "row": rr,
+                                "message": "교차이수과목의 경우 두 개의 행에 각 과목에 대해 작성하고 과목명만 병합해주세요"
+                            })
                             hidden_rec = None
+                        else:
+                            if rr == min_row:
+                                # 병합 영역의 첫 행 -> 왼쪽 과목
+                                target_course = parts[0] if len(parts) > 0 else None
+                            else:
+                                # 병합 영역의 두 번째 행 이후 -> 오른쪽 과목
+                                target_course = parts[1] if len(parts) > 1 else None
+                            
+                            if target_course and target_course in hidden:
+                                hidden_rec = hidden[target_course]
+                                
+                                # 교과(군) 비교 (2025/2026만, '증배' 제외)
+                                if hidden_rec and year in (2025, 2026):
+                                    sheet_subject_group, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, subject_group_col)
+                                    sheet_subject_group_str = safe_strip(sheet_subject_group)
+                                    hidden_subject_group_str = hidden_rec.get("subject_group", "")
+                                    
+                                    # '증배'가 포함된 경우 교과(군) 체크 제외
+                                    if "증배" not in sheet_subject_group_str:
+                                        # 교과(군)이 비어있는 경우
+                                        if not sheet_subject_group_str:
+                                            issues.append({
+                                                "severity": "ERROR", 
+                                                "sheet": sname, 
+                                                "row": rr, 
+                                                "message": f"교과(군)(B열)이 비어 있습니다. (지침: '{hidden_subject_group_str}')"
+                                            })
+                                        elif not hidden_subject_group_str:
+                                            issues.append({
+                                                "severity": "WARNING", 
+                                                "sheet": sname, 
+                                                "row": rr, 
+                                                "message": f"지침에 교과(군) 정보가 없습니다. (시트: '{sheet_subject_group_str}')"
+                                            })
+                                        elif sheet_subject_group_str != hidden_subject_group_str:
+                                            issues.append({
+                                                "severity": "ERROR", 
+                                                "sheet": sname, 
+                                                "row": rr, 
+                                                "message": f"교과(군) 불일치: 시트(B열)='{sheet_subject_group_str}' / 지침(A열)='{hidden_subject_group_str}'"
+                                            })
+                            else:
+                                hidden_rec = None
                     else:
-                        # 병합되지 않은 경우는 검증 생략
+                        # 병합되지 않은 경우 ERROR 발생
+                        issues.append({
+                            "severity": "ERROR",
+                            "sheet": sname,
+                            "row": rr,
+                            "message": "교차이수과목의 경우 두 개의 행에 각 과목에 대해 작성하고 과목명만 병합해주세요"
+                        })
                         hidden_rec = None
                 else:
                     if course_norm not in hidden:
@@ -2271,7 +2288,7 @@ def run_checks(xlsx_path: str):
                                     "severity": "ERROR",
                                     "sheet": sname,
                                     "row": merge_start,
-                                    "message": f"{first_col_name}열 합계 불일치: 셀값={total_n:g}, 기대값({sem_cols_name}합)={expected:g} (구간 {merge_start}~{merge_end}행)(병합되어 있는지 확인하세요.)"
+                                    "message": f"{first_col_name}열 합계 불일치: 셀값={total_n:g}, {sem_cols_name}합={expected:g} (구간 {merge_start}~{merge_end}행)(편성학점 칸이 병합되어 있는지 확인하세요.)"
                                 })
             
         # =========================

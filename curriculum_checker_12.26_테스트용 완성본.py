@@ -347,9 +347,19 @@ def get_column_name(col_num, year=None):
             16: "성적처리"
         }
         
-        # H~M 열은 학기 학점
-        if col_num in range(8, 14):  # H~M
-            return "학기학점"
+        # H~M 열은 학기 학점 (구체적인 학년/학기 정보 포함)
+        if col_num == 8:  # H열
+            return "1학년 1학기"
+        elif col_num == 9:  # I열
+            return "1학년 2학기"
+        elif col_num == 10:  # J열
+            return "2학년 1학기"
+        elif col_num == 11:  # K열
+            return "2학년 2학기"
+        elif col_num == 12:  # L열
+            return "3학년 1학기"
+        elif col_num == 13:  # M열
+            return "3학년 2학기"
         
         return col_names_2024.get(col_num, f"{chr(64 + col_num)}열")
     else:
@@ -363,9 +373,19 @@ def get_column_name(col_num, year=None):
             15: "성적처리"
         }
         
-        # G~L 열은 학기 학점
-        if col_num in range(7, 13):  # G~L
-            return "학기학점"
+        # G~L 열은 학기 학점 (구체적인 학년/학기 정보 포함)
+        if col_num == 7:  # G열
+            return "1학년 1학기"
+        elif col_num == 8:  # H열
+            return "1학년 2학기"
+        elif col_num == 9:  # I열
+            return "2학년 1학기"
+        elif col_num == 10:  # J열
+            return "2학년 2학기"
+        elif col_num == 11:  # K열
+            return "3학년 1학기"
+        elif col_num == 12:  # L열
+            return "3학년 2학기"
         
         return col_names.get(col_num, f"{chr(64 + col_num)}열")
 
@@ -2001,22 +2021,38 @@ def run_checks(xlsx_path: str):
                         issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"운영학점 범위 위반: 시트={op_n:g} / 허용범위={hidden_rec['min']:g}~{hidden_rec['max']:g}"})
 
                 if abs(sem_sum) <= EPS:
-                    prev = None
-                    if rr > first_row:
-                        pv, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr - 1, op_col)
-                        prev = to_number(pv)
-                    if prev is not None and abs(op_n - prev) <= EPS:
-                        pass
+                    # A열(2025/2026) 또는 B열(2024)의 병합 구간 확인
+                    top_row_sum = None
+                    merge_key = (rr, compare_col)
+                    if merge_key in merge_lookup:
+                        # 병합된 셀인 경우, 병합 구간의 최상단 행 찾기
+                        min_row, min_col, max_row, max_col = merge_lookup[merge_key]
+                        top_row = min_row
+                        # 최상단 행의 학기별 열 합 가져오기
+                        if top_row in row_total:
+                            top_row_sum = row_total[top_row]
                     else:
-                        prev_str = str(int(prev)) if prev is not None else '없음'
-                        issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"{sem_cols_name} 합{prev_str}이 운영학점{int(op_n)}과 다릅니다.(학기제라면 오류가 아닐 수 있습니다.)"})
+                        # 병합되지 않은 경우, 현재 행의 합이 0이므로 비교할 값 없음
+                        top_row_sum = None
+                    
+                    if top_row_sum is not None and abs(top_row_sum) > EPS:
+                        # 최상단 행의 학기별 열 합과 운영학점 비교
+                        if abs(op_n - top_row_sum) > EPS:
+                            # 합이 운영학점의 2배인지 확인 (학기제 가능성)
+                            if abs(top_row_sum - op_n * 2) <= EPS:
+                                issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"학기 편성 학점의 합({top_row_sum:g})과 운영학점({op_n:g})이 다릅니다.(학기제라면 오류가 아닐 수 있습니다.)"})
+                            else:
+                                issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"학기 편성 학점의 합({top_row_sum:g})과 운영학점({op_n:g})이 다릅니다."})
+                    elif top_row_sum is None or abs(top_row_sum) <= EPS:
+                        # 병합 구간 최상단 행의 합도 0이거나 없는 경우
+                        issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"학기 편성 학점의 합이 0입니다. 선택군 과목 편성 학점을 확인해주세요."})
                 else:
                     if abs(op_n - sem_sum) > EPS:
                         # 합이 운영학점의 2배인지 확인 (학기제 가능성)
                         if abs(sem_sum - op_n * 2) <= EPS:
-                            issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"운영학점과 편성된 학점 불일치: 운영학점={op_n:g}, {sem_cols_name}합={sem_sum:g} (학기제라면 오류가 아닐 수 있습니다)"})
+                            issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"학기 편성 학점의 합({sem_sum:g})과 운영학점({op_n:g})이 다릅니다.(학기제라면 오류가 아닐 수 있습니다)"})
                         else:
-                            issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"운영학점과 편성된 학점 불일치: 운영학점={op_n:g}, {sem_cols_name}합={sem_sum:g}"})
+                            issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"학기 편성 학점의 합({sem_sum:g})과 운영학점({op_n:g})이 다릅니다."})
 
         # (6) 합계 열 병합 구간 합계 체크 (색깔 행은 기대값에서도 제외)
         checked_spans = set()

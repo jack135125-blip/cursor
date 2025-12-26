@@ -1,7 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 a = Analysis(
-    ['curriculum_checker_12.25_집에서 작업.py'],
+    ['curriculum_checker_12.26_테스트용 완성본.py'],
     pathex=[],
     binaries=[],
     datas=[],

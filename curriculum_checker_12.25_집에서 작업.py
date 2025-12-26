@@ -489,6 +489,10 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             # 행별 검사 - 같은 과목명의 행 순서를 추적
             course_row_index = {}  # {과목명: 현재 인덱스}
             
+            # A열 병합 확인을 위한 변수
+            a_col = 1 if year in [2026, 2025] else 2
+            processed_merges = set()
+            
             for r in range(5, marker_row_src):
                 course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, course_col)
                 if not course_raw or str(course_raw).strip() == "":
@@ -505,39 +509,76 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 if not has_number:
                     continue
                 
-                course_norm = normalize_course_name(course_raw)
+                # A열 병합 확인 - 병합된 구간의 첫 행만 처리
+                key = (r, a_col)
+                if key in merge:
+                    min_row, _, max_row, _ = merge[key]
+                    merge_key = (min_row, max_row)
+                else:
+                    merge_key = (r, r)
                 
-                # '2026 전학년' 시트에 있는지 확인
-                if course_norm not in all_grades_courses:
-                    msg_line1 = f"'{sname}' 시트 {r}행의 '{course_norm}' 과목이 '2026 전학년' 시트에 없습니다."
-                    msg_line2 = "      선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
-                    issues.append({
-                        "severity": "ERROR",
-                        "sheet": all_grades_sheet,
-                        "row": "-",
-                        "message": msg_line1 + "\n" + msg_line2
-                    })
+                # 이미 처리된 병합 구간이면 건너뛰기
+                if merge_key in processed_merges:
                     continue
                 
-                # 같은 과목명의 몇 번째 행인지 확인 (화살표 과목 대응)
-                if course_norm not in course_row_index:
-                    course_row_index[course_norm] = 0
-                else:
-                    course_row_index[course_norm] += 1
+                processed_merges.add(merge_key)
                 
-                idx = course_row_index[course_norm]
-                all_data_list = all_grades_courses[course_norm]
-                
-                # 인덱스가 범위를 벗어나면 마지막 데이터 사용
-                if idx >= len(all_data_list):
-                    idx = len(all_data_list) - 1
-                
-                all_data = all_data_list[idx]
-                for i, src_col in enumerate(src_cols):
-                    dst_col = dst_cols[i]
+                # 병합 구간의 모든 과목명 수집
+                courses_in_merge = []
+                for rr in range(merge_key[0], merge_key[1] + 1):
+                    if rr >= marker_row_src:  # 마커 행 이후는 제외
+                        break
                     
-                    src_val, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, src_col)
-                    dst_val = all_data.get(dst_col)
+                    c_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, course_col)
+                    if not c_raw or str(c_raw).strip() == "":
+                        continue
+                    
+                    # check_cols에 숫자가 있는지 확인
+                    has_num = False
+                    for col in check_cols:
+                        v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, col)
+                        if to_number(v) is not None:
+                            has_num = True
+                            break
+                    
+                    if has_num:
+                        c_norm = normalize_course_name(c_raw)
+                        if c_norm:
+                            courses_in_merge.append((rr, c_norm))
+                
+                # 병합 구간의 과목들을 순서대로 처리
+                for row_num, course_norm in courses_in_merge:
+                    # '2026 전학년' 시트에 있는지 확인
+                    if course_norm not in all_grades_courses:
+                        msg_line1 = f"'{sname}' 시트 {row_num}행의 '{course_norm}' 과목이 '2026 전학년' 시트에 없습니다."
+                        msg_line2 = "      선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
+                        issues.append({
+                            "severity": "ERROR",
+                            "sheet": all_grades_sheet,
+                            "row": "-",
+                            "message": msg_line1 + "\n" + msg_line2
+                        })
+                        continue
+                    
+                    # 같은 과목명의 몇 번째 행인지 확인 (화살표 과목 대응)
+                    if course_norm not in course_row_index:
+                        course_row_index[course_norm] = 0
+                    else:
+                        course_row_index[course_norm] += 1
+                    
+                    idx = course_row_index[course_norm]
+                    all_data_list = all_grades_courses[course_norm]
+                    
+                    # 인덱스가 범위를 벗어나면 마지막 데이터 사용
+                    if idx >= len(all_data_list):
+                        idx = len(all_data_list) - 1
+                    
+                    all_data = all_data_list[idx]
+                    for i, src_col in enumerate(src_cols):
+                        dst_col = dst_cols[i]
+                        
+                        src_val, _, _ = get_value_with_merge(ws_v, ws_f, merge, row_num, src_col)
+                        dst_val = all_data.get(dst_col)
                     
                     # B열은 병합 고려
                     if src_col in [2, 3] or dst_col in [2, 3]:  # 문자열 비교
@@ -551,7 +592,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                                 "severity": "ERROR",
                                 "sheet": all_grades_sheet,
                                 "row": all_data["row"],
-                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
+                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {row_num}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
                             })
                     elif src_col == 15 or dst_col == 15 or src_col == 16 or dst_col == 16:  # O열/P열 (문자열)
                         src_str = safe_strip(src_val)
@@ -564,7 +605,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                                 "severity": "ERROR",
                                 "sheet": all_grades_sheet,
                                 "row": all_data["row"],
-                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
+                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {row_num}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
                             })
                     else:  # 숫자 비교
                         src_num = to_number(src_val)
@@ -580,7 +621,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                                     "severity": "ERROR",
                                     "sheet": all_grades_sheet,
                                     "row": all_data["row"],
-                                    "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
+                                    "message": f"'{course_norm}' 과목: '{sname}' 시트 {row_num}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
                                 })
                         elif src_num is not None or dst_num is not None:
                             src_col_name = get_column_name(src_col, year)
@@ -591,7 +632,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                                 "severity": "ERROR",
                                 "sheet": all_grades_sheet,
                                 "row": all_data["row"],
-                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {r}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
+                                "message": f"'{course_norm}' 과목: '{sname}' 시트 {row_num}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
                             })
         
         # 역방향 검증: '2026 전학년' 시트에만 있고 입학생 시트에 없는 경우
@@ -683,14 +724,27 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             
             processed_merges_all.add(merge_key)
             
-            # 해당 병합 구간에서 각 학년별로 숫자가 있는지 확인
-            has_2026 = False  # G, H열
-            has_2025 = False  # I, J열
-            has_2024 = False  # K, L열
-            
+            # 해당 병합 구간의 모든 과목을 수집하고 각 과목마다 학년을 개별 체크
             for rr in range(merge_key[0], merge_key[1] + 1):
                 if rr >= marker_row_student:
                     break
+                
+                course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 4)  # D열
+                if not course_raw or str(course_raw).strip() == "":
+                    continue
+                
+                course_norm = normalize_course_name(course_raw)
+                if not course_norm:
+                    continue
+                
+                # 총계 행 같은 키워드가 포함된 경우 제외
+                if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
+                    continue
+                
+                # 이 과목의 각 학년별 숫자 확인
+                has_2026 = False  # G, H열
+                has_2025 = False  # I, J열
+                has_2024 = False  # K, L열
                 
                 # 2026 (1학년): G, H열 (7, 8)
                 for col in [7, 8]:
@@ -712,44 +766,30 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                     if to_number(v) is not None:
                         has_2024 = True
                         break
-            
-            # 해당 병합 구간의 모든 과목 수집
-            if has_2026 or has_2025 or has_2024:
-                for rr in range(merge_key[0], merge_key[1] + 1):
-                    if rr >= marker_row_student:
-                        break
-                    
-                    course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 4)  # D열
-                    if not course_raw or str(course_raw).strip() == "":
-                        continue
-                    
-                    course_norm = normalize_course_name(course_raw)
-                    if not course_norm:
-                        continue
-                    
-                    # 총계 행 같은 키워드가 포함된 경우 제외
-                    if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
-                        continue
-                    
-                    # B~L열, O열 값 수집
-                    row_data = {"row": rr}
-                    for col in range(2, 13):  # B~L열 (2~12)
-                        v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
-                        row_data[col] = safe_strip(v) if col in [2, 3] else to_number(v)
-                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 15)
-                    row_data[15] = safe_strip(v)
-                    
-                    # 병합 정보 저장
-                    row_data["merge_start"] = merge_key[0]
-                    row_data["merge_end"] = merge_key[1]
-                    
-                    # 각 학년별로 분류
-                    if has_2026:
-                        student_courses_by_year[2026][course_norm] = row_data
-                    if has_2025:
-                        student_courses_by_year[2025][course_norm] = row_data
-                    if has_2024:
-                        student_courses_by_year[2024][course_norm] = row_data
+                
+                # 어느 학년에도 숫자가 없으면 건너뛰기
+                if not (has_2026 or has_2025 or has_2024):
+                    continue
+                
+                # B~L열, O열 값 수집
+                row_data = {"row": rr}
+                for col in range(2, 13):  # B~L열 (2~12)
+                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
+                    row_data[col] = safe_strip(v) if col in [2, 3] else to_number(v)
+                v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 15)
+                row_data[15] = safe_strip(v)
+                
+                # 병합 정보 저장
+                row_data["merge_start"] = merge_key[0]
+                row_data["merge_end"] = merge_key[1]
+                
+                # 각 학년별로 분류 (이 과목에 숫자가 있는 학년에만 추가)
+                if has_2026:
+                    student_courses_by_year[2026][course_norm] = row_data
+                if has_2025:
+                    student_courses_by_year[2025][course_norm] = row_data
+                if has_2024:
+                    student_courses_by_year[2024][course_norm] = row_data
         
         # 각 입학생 시트 검증
         for year in [2026, 2025, 2024]:
@@ -898,6 +938,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             
             marker_row_student_end = find_marker_row(ws_v, ws_f, merge, "학생선택과목")
             if not marker_row_student_end:
+                # 학생 선택 과목 마커를 못 찾으면 시트 끝까지
                 marker_row_student_end = ws_v.max_row + 1
             
             # 검사할 열 결정
@@ -912,22 +953,54 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 student_course_col = 5
             
             # 전학년 시트에 있는 학생 선택 과목이 입학생 시트에 있는지 확인
+            # A열 병합을 고려하여 검사
+            # 검색 범위: marker_row_src + 1 ~ marker_row_student_end - 1
+            a_col = 1 if year in [2026, 2025] else 2
+            processed_merges_rev = set()
+            
             for course_norm, row_data in student_courses.items():
                 found = False
                 
-                # 입학생 시트의 학생 선택 영역에서 해당 과목 찾기
+                # 입학생 시트에서 해당 과목 찾기 (학교지정 다음부터 학생선택 전까지만)
                 for r in range(marker_row_src + 1, marker_row_student_end):
-                    course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, student_course_col)
-                    if not course_raw:
+                    # A열 병합 확인
+                    key = (r, a_col)
+                    if key in merge:
+                        min_row, _, max_row, _ = merge[key]
+                        merge_key = (min_row, max_row)
+                    else:
+                        merge_key = (r, r)
+                    
+                    # 이미 처리된 병합 구간이면 건너뛰기
+                    if merge_key in processed_merges_rev:
                         continue
                     
-                    if normalize_course_name(course_raw) == course_norm:
-                        # check_cols에 숫자가 있는지 확인
+                    processed_merges_rev.add(merge_key)
+                    
+                    # 병합 구간 내에 check_cols에 숫자가 있는지 먼저 확인
+                    has_number_in_merge = False
+                    for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
                         for col in check_cols:
-                            v, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, col)
+                            v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, col)
                             if to_number(v) is not None:
+                                has_number_in_merge = True
+                                break
+                        if has_number_in_merge:
+                            break
+                    
+                    # 병합 구간 내에 숫자가 있으면 모든 과목 확인
+                    if has_number_in_merge:
+                        for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
+                            course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, student_course_col)
+                            if not course_raw:
+                                continue
+                            
+                            if normalize_course_name(course_raw) == course_norm:
                                 found = True
                                 break
+                        
+                        if found:
+                            break
                     
                     if found:
                         break

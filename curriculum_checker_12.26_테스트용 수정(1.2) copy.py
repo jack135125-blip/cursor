@@ -517,7 +517,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 # '2026 전학년' 시트에 있는지 확인
                 if course_norm not in all_grades_courses:
                     msg_line1 = f"'{sname}' 시트 {r}행의 '{course_norm}' 과목이 '2026 전학년' 시트에 없습니다."
-                    msg_line2 = "      선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
+                    msg_line2 = "      선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가하고 개설여부에 X해주세요."
                     issues.append({
                         "severity": "ERROR",
                         "sheet": all_grades_sheet,
@@ -933,7 +933,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                                 else:  # 2024
                                     col_name = "K열(3학년 1학기)" if col_key == 'K' else "L열(3학년 2학기)"
                                 msg_line1 = f"'{sname}' 시트의 '{cn}' 과목({course_row}행)이 '2026 전학년' 시트의 {col_name}에 없습니다."
-                                msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
+                                msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가하고 개설여부에 X해주세요."
                                 issues.append({
                                     "severity": "ERROR",
                                     "sheet": all_grades_sheet,
@@ -1159,7 +1159,7 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                             else:  # 2024
                                 col_name = "K열(3학년 1학기)" if col_key == 'K' else "L열(3학년 2학기)"
                             msg_line1 = f"'{sname}' 시트의 '{cn}' 과목({course_row}행, 학생 선택)이 '2026 전학년' 시트에 없습니다."
-                            msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
+                            msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가하고 개설여부에 X해주세요."
                             issues.append({
                                 "severity": "ERROR",
                                 "sheet": all_grades_sheet,
@@ -3650,7 +3650,7 @@ class App:
                                        sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
                             
                             # 학생 선택 과목 목록 마지막에 안내 문구 한 번만 추가
-                            self._w(tab, "      선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요.\n", "INFO")
+                            self._w(tab, "      선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가하고 개설여부에 X해주세요.\n", "INFO")
                     
                     # 기타 오류들
                     if other_items:

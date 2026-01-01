@@ -4,24 +4,10 @@
 - 단일 파일(모듈 분리 없음)
 - .xlsx / .xlsm 지원 (openpyxl)
 
-요구사항 반영(버전 v4)
-1) 문제상황 출력:
-   - 시트별로 별도 "칸"에 표시(Notebook 탭: 전체/각 시트/기타)
-2) 2025/2026 입학생 시트:
-   - 과목명(D열) 셀에 채우기 색(흰색 제외)이 있으면 그 행은 "모든 검사" 제외
-   - 병합 셀인 경우, 해당 D셀의 병합 top-left 셀의 색도 함께 판단(엑셀에서 보이는 색을 더 정확히 반영)
-3) 운영학점(F) vs G~L 합:
-   - G~L 합이 0이면 '바로 위 행의 운영학점(F)'과 같으면 통과
-4) 2024 입학생 시트:
-   - 과목명(D) 숨김 시트 일치 여부는 확인하지 않음(불일치 오류 미출력)
-5) 과목명에 ↔ 가 있으면:
-   - 좌/우 과목명을 각각 숨김 시트에 존재하는지 확인(없으면 오류)
-   - ↔ 행은 숨김 기반(유형/기본학점/성적처리/범위) 비교는 생략
-   - 단, 내부 일관성(운영학점 vs G~L 합, M/N 합계 계산)은 계속 점검(색깔 행은 전부 제외)
 
 사용 방법
 1) pip install openpyxl
-2) python curriculum_checker_v4.py
+
 """
 
 import os
@@ -32,6 +18,7 @@ import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
 from io import BytesIO
+
 
 from openpyxl import load_workbook
 
@@ -682,15 +669,24 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
         # '2026 전학년' 시트의 교과목 수집 (marker_row_all ~ marker_row_student 사이)
         # A열 병합 구간별로 과목 수집
         student_courses_by_year = {
-            2026: {},  # G, H열에 숫자가 있는 과목 (1학년) - 리스트로 저장
-            2025: {},  # I, J열에 숫자가 있는 과목 (2학년) - 리스트로 저장
-            2024: {}   # K, L열에 숫자가 있는 과목 (3학년) - 리스트로 저장
+            2026: {
+                'G': {},  # G열(7)에 숫자가 있는 과목 (1학년 1학기) - 리스트로 저장
+                'H': {}   # H열(8)에 숫자가 있는 과목 (1학년 2학기) - 리스트로 저장
+            },
+            2025: {
+                'I': {},  # I열(9)에 숫자가 있는 과목 (2학년 1학기) - 리스트로 저장
+                'J': {}   # J열(10)에 숫자가 있는 과목 (2학년 2학기) - 리스트로 저장
+            },
+            2024: {
+                'K': {},  # K열(11)에 숫자가 있는 과목 (3학년 1학기) - 리스트로 저장
+                'L': {}   # L열(12)에 숫자가 있는 과목 (3학년 2학기) - 리스트로 저장
+            }
         }
         
         processed_merges_all = set()
         
         for r in range(marker_row_all + 1, marker_row_student):
-            # A열 병합 확인 (전학년 시트는 A열 사용)
+            # 먼저 A열 병합 확인 (전학년 시트는 A열 사용)
             key = (r, 1)  # A열
             if key in merge_all:
                 min_row, _, max_row, _ = merge_all[key]
@@ -709,54 +705,66 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             
             processed_merges_all.add(merge_key)
             
-            # 해당 병합 구간에서 각 학년별로 숫자가 있는지 확인
-            has_2026 = False  # G, H열
-            has_2025 = False  # I, J열
-            has_2024 = False  # K, L열
+            # 병합 구간 내에서 각 학년별 열에 숫자가 하나라도 있는지 확인
+            has_2026_G = False  # G열 (7) - 1학년 1학기
+            has_2026_H = False  # H열 (8) - 1학년 2학기
+            has_2025_I = False  # I열 (9) - 2학년 1학기
+            has_2025_J = False  # J열 (10) - 2학년 2학기
+            has_2024_K = False  # K열 (11) - 3학년 1학기
+            has_2024_L = False  # L열 (12) - 3학년 2학기
             
-            for rr in range(merge_key[0], merge_key[1] + 1):
-                if rr >= marker_row_student:
-                    break
+            for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student)):
+                # 2026 (1학년): G열 (7) - 1학기
+                v_G, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 7)
+                if to_number(v_G) is not None:
+                    has_2026_G = True
                 
-                # 2026 (1학년): G, H열 (7, 8)
-                for col in [7, 8]:
-                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
-                    if to_number(v) is not None:
-                        has_2026 = True
-                        break
+                # 2026 (1학년): H열 (8) - 2학기
+                v_H, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 8)
+                if to_number(v_H) is not None:
+                    has_2026_H = True
                 
-                # 2025 (2학년): I, J열 (9, 10)
-                for col in [9, 10]:
-                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
-                    if to_number(v) is not None:
-                        has_2025 = True
-                        break
+                # 2025 (2학년): I열 (9) - 1학기
+                v_I, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 9)
+                if to_number(v_I) is not None:
+                    has_2025_I = True
                 
-                # 2024 (3학년): K, L열 (11, 12)
-                for col in [11, 12]:
-                    v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, col)
-                    if to_number(v) is not None:
-                        has_2024 = True
-                        break
+                # 2025 (2학년): J열 (10) - 2학기
+                v_J, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 10)
+                if to_number(v_J) is not None:
+                    has_2025_J = True
+                
+                # 2024 (3학년): K열 (11) - 1학기
+                v_K, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 11)
+                if to_number(v_K) is not None:
+                    has_2024_K = True
+                
+                # 2024 (3학년): L열 (12) - 2학기
+                v_L, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 12)
+                if to_number(v_L) is not None:
+                    has_2024_L = True
             
-            # 해당 병합 구간의 모든 과목 수집
-            if has_2026 or has_2025 or has_2024:
-                for rr in range(merge_key[0], merge_key[1] + 1):
-                    if rr >= marker_row_student:
-                        break
-                    
-                    course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 4)  # D열
-                    if not course_raw or str(course_raw).strip() == "":
-                        continue
-                    
-                    course_norm = normalize_course_name(course_raw)
-                    if not course_norm:
-                        continue
-                    
-                    # 총계 행 같은 키워드가 포함된 경우 제외
-                    if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
-                        continue
-                    
+            # 숫자가 없으면 건너뛰기
+            if not (has_2026_G or has_2026_H or has_2025_I or has_2025_J or has_2024_K or has_2024_L):
+                continue
+            
+            # 해당 병합 구간 내에서 각 학년별로 숫자가 있는 행만 과목 수집
+            for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student)):
+                c_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 4)  # D열
+                if not c_raw:
+                    continue
+                
+                # 총계 행 같은 키워드가 포함된 경우 제외
+                if any(keyword in str(c_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
+                    continue
+                
+                course_norm_rr = normalize_course_name(c_raw)
+                if not course_norm_rr:  # 빈 문자열이 아닌 경우만 추가
+                    continue
+                
+                # 병합 구간 전체에서 해당 학년 열에 숫자가 하나라도 있으면, 이 행의 과목도 수집
+                # (각 행의 개별 숫자 확인이 아니라, 병합 구간 전체의 숫자 확인 결과 사용)
+                if has_2026_G or has_2026_H or has_2025_I or has_2025_J or has_2024_K or has_2024_L:
                     # B~L열, O열 값 수집
                     row_data = {"row": rr}
                     for col in range(2, 13):  # B~L열 (2~12)
@@ -770,18 +778,31 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                     row_data["merge_end"] = merge_key[1]
                     
                     # 각 학년별로 분류 (리스트로 추가)
-                    if has_2026:
-                        if course_norm not in student_courses_by_year[2026]:
-                            student_courses_by_year[2026][course_norm] = []
-                        student_courses_by_year[2026][course_norm].append(row_data)
-                    if has_2025:
-                        if course_norm not in student_courses_by_year[2025]:
-                            student_courses_by_year[2025][course_norm] = []
-                        student_courses_by_year[2025][course_norm].append(row_data)
-                    if has_2024:
-                        if course_norm not in student_courses_by_year[2024]:
-                            student_courses_by_year[2024][course_norm] = []
-                        student_courses_by_year[2024][course_norm].append(row_data)
+                    # 병합 구간 전체에서 해당 학년 열에 숫자가 있으면 추가
+                    if has_2026_G:
+                        if course_norm_rr not in student_courses_by_year[2026]['G']:
+                            student_courses_by_year[2026]['G'][course_norm_rr] = []
+                        student_courses_by_year[2026]['G'][course_norm_rr].append(row_data)
+                    if has_2026_H:
+                        if course_norm_rr not in student_courses_by_year[2026]['H']:
+                            student_courses_by_year[2026]['H'][course_norm_rr] = []
+                        student_courses_by_year[2026]['H'][course_norm_rr].append(row_data)
+                    if has_2025_I:
+                        if course_norm_rr not in student_courses_by_year[2025]['I']:
+                            student_courses_by_year[2025]['I'][course_norm_rr] = []
+                        student_courses_by_year[2025]['I'][course_norm_rr].append(row_data)
+                    if has_2025_J:
+                        if course_norm_rr not in student_courses_by_year[2025]['J']:
+                            student_courses_by_year[2025]['J'][course_norm_rr] = []
+                        student_courses_by_year[2025]['J'][course_norm_rr].append(row_data)
+                    if has_2024_K:
+                        if course_norm_rr not in student_courses_by_year[2024]['K']:
+                            student_courses_by_year[2024]['K'][course_norm_rr] = []
+                        student_courses_by_year[2024]['K'][course_norm_rr].append(row_data)
+                    if has_2024_L:
+                        if course_norm_rr not in student_courses_by_year[2024]['L']:
+                            student_courses_by_year[2024]['L'][course_norm_rr] = []
+                        student_courses_by_year[2024]['L'][course_norm_rr].append(row_data)
         
         # 각 입학생 시트 검증
         for year in [2026, 2025, 2024]:
@@ -805,215 +826,225 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             
             # 검사할 열 결정 (입학생 시트에서 확인할 열)
             if year == 2026:
-                check_cols = [7, 8]  # G, H (1학년)
+                # 2026년은 G열과 H열을 각각 별도로 처리
+                check_cols_list = [[7], [8]]  # G열, H열을 각각 별도로
                 student_course_col = 4  # D열
             elif year == 2025:
-                check_cols = [9, 10]  # I, J (2학년)
+                # 2025년은 I열과 J열을 각각 별도로 처리
+                check_cols_list = [[9], [10]]  # I열, J열을 각각 별도로
                 student_course_col = 4  # D열
             else:  # 2024
-                check_cols = [12, 13]  # L, M (3학년)
+                # 2024년은 L열과 M열을 각각 별도로 처리 (입학생 시트 기준)
+                check_cols_list = [[12], [13]]  # L열, M열을 각각 별도로
                 student_course_col = 5  # E열 (2024는 과목명이 E열에 있음)
             
-            # A열(2026/2025) 또는 B열(2024) 병합 구간별로 과목 수집
-            # marker_row_src ~ marker_row_student_end 사이만 검사
-            a_col = 1 if year in [2026, 2025] else 2
+            a_col = 1 if year in [2026, 2025] else 2  # '증배' 확인용
             
-            processed_merges = set()
-            
-            for r in range(marker_row_src + 1, marker_row_student_end):
-                course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, student_course_col)
-                if not course_raw or str(course_raw).strip() == "":
-                    continue
-                
-                # check_cols에 숫자가 있는지 확인
-                has_number = False
-                for col in check_cols:
-                    v, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, col)
-                    if to_number(v) is not None:
-                        has_number = True
-                        break
-                
-                if not has_number:
-                    continue
-                
-                course_norm = normalize_course_name(course_raw)
-                if not course_norm:  # 빈 문자열인 경우 건너뛰기
-                    continue
-                
-                # 총계 행 같은 키워드가 포함된 경우 제외
-                if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
-                    continue
-                
-                # A열 병합 확인
-                key = (r, a_col)
-                if key in merge:
-                    min_row, _, max_row, _ = merge[key]
-                    # A열 병합에 '증배'가 포함되어 있는지 확인
-                    a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
-                    if a_col_value and '증배' in str(a_col_value):
-                        # '증배'가 있으면 병합으로 판단하지 않음
-                        merge_key = (r, r)
-                    else:
-                        merge_key = (min_row, max_row)
-                else:
-                    merge_key = (r, r)
-                
-                if merge_key in processed_merges:
-                    continue
-                
-                processed_merges.add(merge_key)
-                
-                # 해당 병합 구간의 모든 과목 수집 (marker_row_student_end 이전까지만)
-                # 행 번호와 함께 저장하여 순서 유지
-                courses_in_merge = []  # (과목명, 행번호) 튜플 리스트
-                for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
-                    c_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, student_course_col)
-                    if not c_raw:
-                        continue
+            # 모든 학년을 각 열별로 처리
+            if year in [2026, 2025, 2024]:
+                for col_idx, check_cols in enumerate(check_cols_list):
+                    check_col = check_cols[0]  # 각 학년별 열
+                    # col_key 결정: 전학년 시트의 열 키
+                    if year == 2026:
+                        col_key = 'G' if check_col == 7 else 'H'  # G열(7) 또는 H열(8)
+                    elif year == 2025:
+                        col_key = 'I' if check_col == 9 else 'J'  # I열(9) 또는 J열(10)
+                    else:  # 2024
+                        # 입학생 시트 L(12) -> 전학년 시트 K(11), 입학생 시트 M(13) -> 전학년 시트 L(12)
+                        col_key = 'K' if check_col == 12 else 'L'  # K열(전학년 11) 또는 L열(전학년 12)
                     
-                    # 총계 행 같은 키워드가 포함된 경우 제외
-                    if any(keyword in str(c_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
-                        continue
+                    processed_merges = set()
                     
-                    # 해당 행의 check_cols에 숫자가 있는지 확인
-                    has_num = False
-                    for col in check_cols:
-                        v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, col)
-                        if to_number(v) is not None:
-                            has_num = True
-                            break
-                    
-                    if has_num:
-                        normalized = normalize_course_name(c_raw)
-                        if normalized:  # 빈 문자열이 아닌 경우만 추가
-                            courses_in_merge.append((normalized, rr))  # 행 번호와 함께 저장
-                
-                # '2026 전학년' 시트에 해당 과목들이 모두 있는지 확인 (해당 학년 열 기준)
-                student_courses = student_courses_by_year.get(year, {})
-                
-                # courses_in_merge는 이미 (과목명, 행번호) 튜플 리스트로 순서가 유지됨
-                # 과목명별로 그룹화하여 순서 유지
-                course_occurrence_count = {}  # 각 과목명이 몇 번째 나왔는지 추적
-                
-                for cn, course_row in courses_in_merge:
-                    if cn not in student_courses:
-                        # 학년 계산: 2026 입학생 = 1학년, 2025 = 2학년, 2024 = 3학년
-                        grade = 2027 - year
-                        msg_line1 = f"'{sname}' 시트의 '{cn}' 과목이 '2026 전학년' 시트의 해당 학년({grade}학년) 열에 없습니다."
-                        msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
-                        issues.append({
-                            "severity": "ERROR",
-                            "sheet": all_grades_sheet,
-                            "row": "-",
-                            "message": msg_line1 + "\n" + msg_line2
-                        })
-                    else:
-                        # 과목이 여러 번 나오는 경우를 고려하여 순서대로 매칭
-                        all_data_list = student_courses[cn]  # 리스트
-                        
-                        # 현재 과목명의 몇 번째 출현인지 확인
-                        if cn not in course_occurrence_count:
-                            course_occurrence_count[cn] = 0
-                        occurrence_index = course_occurrence_count[cn]
-                        course_occurrence_count[cn] += 1
-                        
-                        # 리스트 범위 확인
-                        if occurrence_index >= len(all_data_list):
-                            # 전학년 시트에는 있는데 그 순서의 과목이 없는 경우
+                    for r in range(marker_row_src + 1, marker_row_student_end):
+                        course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, student_course_col)
+                        if not course_raw or str(course_raw).strip() == "":
                             continue
                         
-                        all_data = all_data_list[occurrence_index]
+                        # 해당 열에 숫자가 있는지 확인
+                        v, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, check_col)
+                        if to_number(v) is None:
+                            continue
                         
-                        # A열에 '증배'가 포함되어 있는지 확인
-                        a_col_for_check = 1 if year in [2026, 2025] else 2
-                        a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, a_col_for_check)
-                        has_jeungbae = a_col_value and '증배' in str(a_col_value)
+                        course_norm = normalize_course_name(course_raw)
+                        if not course_norm:  # 빈 문자열인 경우 건너뛰기
+                            continue
                         
-                        # 비교할 열 결정
-                        if year == 2026:
-                            # 2026: B, C, E, F, G, H, O (교과군, 유형, 기본, 운영, 1학년 1학기, 1학년 2학기, 성적)
-                            src_cols = [2, 3, 5, 6, 7, 8, 15]
-                            dst_cols = [2, 3, 5, 6, 7, 8, 15]
-                        elif year == 2025:
-                            # 2025: B, C, E, F, I, J, O (교과군, 유형, 기본, 운영, 2학년 1학기, 2학년 2학기, 성적)
-                            src_cols = [2, 3, 5, 6, 9, 10, 15]
-                            dst_cols = [2, 3, 5, 6, 9, 10, 15]
-                        else:  # 2024
-                            # 2024: C, D, F, G, L, M, P (교과군, 유형, 기본, 운영, 3학년 1학기, 3학년 2학기, 성적)
-                            # 전학년은 B, C, E, F, K, L, O
-                            src_cols = [3, 4, 6, 7, 12, 13, 16]
-                            dst_cols = [2, 3, 5, 6, 11, 12, 15]
+                        # 총계 행 같은 키워드가 포함된 경우 제외
+                        if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
+                            continue
                         
-                        # 각 열 비교
-                        for i, src_col in enumerate(src_cols):
-                            dst_col = dst_cols[i]
-                            
-                            src_val, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, src_col)
-                            dst_val = all_data.get(dst_col)
-                            
-                            # 문자열 비교 (교과군, 과목유형)
-                            if src_col in [2, 3] or dst_col in [2, 3]:
-                                # '증배'가 있고 교과(군) 열인 경우 비교 건너뛰기
-                                if has_jeungbae and (src_col == 2 or dst_col == 2 or src_col == 3 or dst_col == 3):
-                                    # 2024 시트는 C열(3)이 교과군, 2026/2025는 B열(2)이 교과군
-                                    is_gyogwa_col = (src_col == 2 or dst_col == 2) if year in [2026, 2025] else (src_col == 3 or dst_col == 3)
-                                    if is_gyogwa_col:
-                                        continue
-                                
-                                src_str = safe_strip(src_val)
-                                dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
-                                
-                                if src_str != dst_str:
-                                    src_col_name = get_column_name(src_col, year)
-                                    dst_col_name = get_column_name(dst_col)
-                                    issues.append({
-                                        "severity": "ERROR",
-                                        "sheet": all_grades_sheet,
-                                        "row": all_data["row"],
-                                        "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
-                                    })
-                            # 성적처리 비교
-                            elif src_col == 15 or dst_col == 15 or src_col == 16 or dst_col == 16:
-                                src_str = safe_strip(src_val)
-                                dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
-                                
-                                if src_str != dst_str:
-                                    src_col_name = get_column_name(src_col, year)
-                                    dst_col_name = get_column_name(dst_col)
-                                    issues.append({
-                                        "severity": "ERROR",
-                                        "sheet": all_grades_sheet,
-                                        "row": all_data["row"],
-                                        "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
-                                    })
-                            # 숫자 비교 (기본학점, 운영학점, 학기학점)
+                        # A열(또는 B열) 병합 확인
+                        key = (r, a_col)
+                        if key in merge:
+                            min_row, _, max_row, _ = merge[key]
+                            # A열 병합에 '증배'가 포함되어 있는지 확인
+                            a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                            if a_col_value and '증배' in str(a_col_value):
+                                merge_key = (r, r)
                             else:
-                                src_num = to_number(src_val)
-                                dst_num = dst_val if isinstance(dst_val, (int, float)) else to_number(dst_val)
+                                merge_key = (min_row, max_row)
+                        else:
+                            merge_key = (r, r)
+                        
+                        if merge_key in processed_merges:
+                            continue
+                        
+                        processed_merges.add(merge_key)
+                        
+                        # 해당 병합 구간의 모든 과목 수집
+                        courses_in_merge = []  # (과목명, 행번호) 튜플 리스트
+                        
+                        # 먼저 병합 구간에서 check_col에 숫자가 있는지 확인
+                        has_number_in_merge = False
+                        for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
+                            v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, check_col)
+                            if to_number(v) is not None:
+                                has_number_in_merge = True
+                                break
+                        
+                        # 병합 구간 전체에서 숫자가 하나라도 있으면, 병합 구간의 모든 행에서 과목 수집
+                        if has_number_in_merge:
+                            for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
+                                c_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, student_course_col)
+                                if not c_raw:
+                                    continue
                                 
-                                if src_num is not None and dst_num is not None:
-                                    if abs(src_num - dst_num) > EPS:
-                                        src_col_name = get_column_name(src_col, year)
-                                        dst_col_name = get_column_name(dst_col)
-                                        src_num_str = format_number(src_num)
-                                        dst_num_str = format_number(dst_num)
-                                        issues.append({
-                                            "severity": "ERROR",
-                                            "sheet": all_grades_sheet,
-                                            "row": all_data["row"],
-                                            "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
-                                        })
-                                elif src_num is not None or dst_num is not None:
-                                    src_col_name = get_column_name(src_col, year)
-                                    dst_col_name = get_column_name(dst_col)
-                                    src_num_str = format_number(src_num)
-                                    dst_num_str = format_number(dst_num)
-                                    issues.append({
-                                        "severity": "ERROR",
-                                        "sheet": all_grades_sheet,
-                                        "row": all_data["row"],
-                                        "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
-                                    })
+                                # 총계 행 같은 키워드가 포함된 경우 제외
+                                if any(keyword in str(c_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
+                                    continue
+                                
+                                normalized = normalize_course_name(c_raw)
+                                if normalized:  # 빈 문자열이 아닌 경우만 추가
+                                    courses_in_merge.append((normalized, rr))  # 행 번호와 함께 저장
+                        
+                        # '2026 전학년' 시트에 해당 과목들이 모두 있는지 확인 (해당 열 기준)
+                        student_courses = student_courses_by_year.get(year, {}).get(col_key, {})
+                        
+                        # courses_in_merge는 이미 (과목명, 행번호) 튜플 리스트로 순서가 유지됨
+                        course_occurrence_count = {}  # 각 과목명이 몇 번째 나왔는지 추적
+                        
+                        for cn, course_row in courses_in_merge:
+                            if cn not in student_courses:
+                                # 각 열별로 적절한 열 이름 표시
+                                if year == 2026:
+                                    col_name = "G열(1학년 1학기)" if col_key == 'G' else "H열(1학년 2학기)"
+                                elif year == 2025:
+                                    col_name = "I열(2학년 1학기)" if col_key == 'I' else "J열(2학년 2학기)"
+                                else:  # 2024
+                                    col_name = "K열(3학년 1학기)" if col_key == 'K' else "L열(3학년 2학기)"
+                                msg_line1 = f"'{sname}' 시트의 '{cn}' 과목({course_row}행)이 '2026 전학년' 시트의 {col_name}에 없습니다."
+                                msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
+                                issues.append({
+                                    "severity": "ERROR",
+                                    "sheet": all_grades_sheet,
+                                    "row": "-",
+                                    "message": msg_line1 + "\n" + msg_line2
+                                })
+                            else:
+                                # 과목이 여러 번 나오는 경우를 고려하여 순서대로 매칭
+                                all_data_list = student_courses[cn]  # 리스트
+                                
+                                # 현재 과목명의 몇 번째 출현인지 확인
+                                if cn not in course_occurrence_count:
+                                    course_occurrence_count[cn] = 0
+                                occurrence_index = course_occurrence_count[cn]
+                                course_occurrence_count[cn] += 1
+                                
+                                # 리스트 범위 확인
+                                if occurrence_index >= len(all_data_list):
+                                    continue
+                                
+                                all_data = all_data_list[occurrence_index]
+                                
+                                # A열에 '증배'가 포함되어 있는지 확인
+                                a_col_for_check = 1 if year in [2026, 2025] else 2
+                                a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, a_col_for_check)
+                                has_jeungbae = a_col_value and '증배' in str(a_col_value)
+                                
+                                # 비교할 열 결정
+                                if year == 2026:
+                                    # 2026년: G(7), H(8) 열 비교
+                                    src_cols = [2, 3, 5, 6, check_col, 15]
+                                    dst_cols = [2, 3, 5, 6, check_col, 15]
+                                elif year == 2025:
+                                    # 2025년: I(9), J(10) 열 비교
+                                    src_cols = [2, 3, 5, 6, check_col, 15]
+                                    dst_cols = [2, 3, 5, 6, check_col, 15]
+                                else:  # 2024
+                                    # 2024년: 입학생 시트 L(12), M(13) -> 전학년 시트 K(11), L(12)
+                                    dst_check_col = 11 if check_col == 12 else 12  # 전학년 시트 열
+                                    src_cols = [3, 4, 6, 7, check_col, 16]
+                                    dst_cols = [2, 3, 5, 6, dst_check_col, 15]
+                                
+                                # 각 열 비교
+                                for i, src_col in enumerate(src_cols):
+                                    dst_col = dst_cols[i]
+                                    
+                                    src_val, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, src_col)
+                                    dst_val = all_data.get(dst_col)
+                                    
+                                    # 문자열 비교 (교과군, 과목유형)
+                                    if src_col in [2, 3] or dst_col in [2, 3]:
+                                        # '증배'가 있고 교과(군) 열인 경우 비교 건너뛰기
+                                        if has_jeungbae and (src_col == 2 or dst_col == 2 or (year == 2024 and (src_col == 3 or dst_col == 3))):
+                                            is_gyogwa_col = (src_col == 2 or dst_col == 2) if year in [2026, 2025] else (src_col == 3 or dst_col == 3)
+                                            if is_gyogwa_col:
+                                                continue
+                                        
+                                        src_str = safe_strip(src_val)
+                                        dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
+                                        
+                                        if src_str != dst_str:
+                                            src_col_name = get_column_name(src_col, year)
+                                            dst_col_name = get_column_name(dst_col)
+                                            issues.append({
+                                                "severity": "ERROR",
+                                                "sheet": all_grades_sheet,
+                                                "row": all_data["row"],
+                                                "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
+                                            })
+                                    # 성적처리 비교
+                                    elif src_col == 15 or dst_col == 15:
+                                        src_str = safe_strip(src_val)
+                                        dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
+                                        
+                                        if src_str != dst_str:
+                                            src_col_name = get_column_name(src_col, year)
+                                            dst_col_name = get_column_name(dst_col)
+                                            issues.append({
+                                                "severity": "ERROR",
+                                                "sheet": all_grades_sheet,
+                                                "row": all_data["row"],
+                                                "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
+                                            })
+                                    # 숫자 비교 (기본학점, 운영학점, 학기학점)
+                                    else:
+                                        src_num = to_number(src_val)
+                                        dst_num = dst_val if isinstance(dst_val, (int, float)) else to_number(dst_val)
+                                        
+                                        if src_num is not None and dst_num is not None:
+                                            if abs(src_num - dst_num) > EPS:
+                                                src_col_name = get_column_name(src_col, year)
+                                                dst_col_name = get_column_name(dst_col)
+                                                src_num_str = format_number(src_num)
+                                                dst_num_str = format_number(dst_num)
+                                                issues.append({
+                                                    "severity": "ERROR",
+                                                    "sheet": all_grades_sheet,
+                                                    "row": all_data["row"],
+                                                    "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
+                                                })
+                                        elif src_num is not None or dst_num is not None:
+                                            src_col_name = get_column_name(src_col, year)
+                                            dst_col_name = get_column_name(dst_col)
+                                            src_num_str = format_number(src_num)
+                                            dst_num_str = format_number(dst_num)
+                                            issues.append({
+                                                "severity": "ERROR",
+                                                "sheet": all_grades_sheet,
+                                                "row": all_data["row"],
+                                                "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
+                                            })
         
         # ===== 학생 선택 과목 정방향 검증 추가 =====
         # 각 입학생 시트의 학생 선택 영역 검증
@@ -1042,168 +1073,191 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             
             # 검사할 열 결정
             if year == 2026:
-                check_cols = [7, 8]  # G, H
+                # 2026년은 G열과 H열을 각각 별도로 처리
+                check_cols_list = [[7], [8]]  # G열, H열을 각각 별도로
                 student_course_col = 4  # D열
             elif year == 2025:
-                check_cols = [9, 10]  # I, J
+                # 2025년은 I열과 J열을 각각 별도로 처리
+                check_cols_list = [[9], [10]]  # I열, J열을 각각 별도로
                 student_course_col = 4  # D열
             else:  # 2024
-                check_cols = [12, 13]  # L, M
+                # 2024년은 L열과 M열을 각각 별도로 처리 (입학생 시트 기준)
+                check_cols_list = [[12], [13]]  # L열, M열을 각각 별도로
                 student_course_col = 5  # E열
             
             # A열(2026/2025) 또는 B열(2024) 병합 구간별로 과목 수집
-            a_col = 1 if year in [2026, 2025] else 2
-            processed_merges_student = set()
+            a_col = 1 if year in [2026, 2025] else 2  # A열 또는 B열
             
-            for r in range(marker_row_student_start + 1, marker_row_student_real_end):
-                course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, student_course_col)
-                if not course_raw or str(course_raw).strip() == "":
-                    continue
+            # 모든 학년을 각 열별로 처리
+            for col_idx, check_cols in enumerate(check_cols_list):
+                check_col = check_cols[0]  # 각 학년별 열
+                # col_key 결정: 전학년 시트의 열 키
+                if year == 2026:
+                    col_key = 'G' if check_col == 7 else 'H'  # G열(7) 또는 H열(8)
+                elif year == 2025:
+                    col_key = 'I' if check_col == 9 else 'J'  # I열(9) 또는 J열(10)
+                else:  # 2024
+                    # 입학생 시트 L(12) -> 전학년 시트 K(11), 입학생 시트 M(13) -> 전학년 시트 L(12)
+                    col_key = 'K' if check_col == 12 else 'L'  # K열(전학년 11) 또는 L열(전학년 12)
                 
-                # check_cols에 숫자가 있는지 확인
-                has_number = False
-                for col in check_cols:
-                    v, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, col)
-                    if to_number(v) is not None:
-                        has_number = True
-                        break
-                
-                if not has_number:
-                    continue
-                
-                # A열 병합 확인
-                key = (r, a_col)
-                if key in merge:
-                    min_row, _, max_row, _ = merge[key]
-                    # A열 병합에 '증배'가 포함되어 있는지 확인
-                    a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
-                    if a_col_value and '증배' in str(a_col_value):
-                        merge_key = (r, r)
-                    else:
-                        merge_key = (min_row, max_row)
-                else:
-                    merge_key = (r, r)
-                
-                if merge_key in processed_merges_student:
-                    continue
-                
-                processed_merges_student.add(merge_key)
-                
-                # 해당 병합 구간의 모든 과목 수집 (행 번호와 함께 저장)
-                courses_in_merge_student = []  # (과목명, 행번호) 튜플 리스트
-                for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_real_end)):
-                    c_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, student_course_col)
-                    if not c_raw:
-                        continue
-                    
-                    if any(keyword in str(c_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
-                        continue
-                    
-                    # 해당 행의 check_cols에 숫자가 있는지 확인
-                    has_num = False
-                    for col in check_cols:
-                        v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, col)
-                        if to_number(v) is not None:
-                            has_num = True
-                            break
-                    
-                    if has_num:
-                        normalized = normalize_course_name(c_raw)
-                        if normalized:
-                            courses_in_merge_student.append((normalized, rr))
-                
-                # 전학년 시트에 해당 과목들이 있는지 확인
-                student_courses = student_courses_by_year.get(year, {})
+                processed_merges_student = set()
                 course_occurrence_count_student = {}
                 
-                for cn, course_row in courses_in_merge_student:
-                    if cn not in student_courses:
-                        grade = 2027 - year
-                        msg_line1 = f"'{sname}' 시트의 '{cn}' 과목(학생 선택)이 '2026 전학년' 시트의 해당 학년({grade}학년) 열에 없습니다."
-                        msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
-                        issues.append({
-                            "severity": "ERROR",
-                            "sheet": all_grades_sheet,
-                            "row": "-",
-                            "message": msg_line1 + "\n" + msg_line2
-                        })
+                for r in range(marker_row_student_start + 1, marker_row_student_real_end):
+                    # A열(또는 B열) 병합 확인
+                    key = (r, a_col)
+                    if key in merge:
+                        min_row, _, max_row, _ = merge[key]
+                        a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                        if a_col_value and '증배' in str(a_col_value):
+                            merge_key = (r, r)
+                        else:
+                            merge_key = (min_row, max_row)
                     else:
-                        # 순서 고려하여 매칭
-                        all_data_list = student_courses[cn]
-                        
-                        if cn not in course_occurrence_count_student:
-                            course_occurrence_count_student[cn] = 0
-                        occurrence_index = course_occurrence_count_student[cn]
-                        course_occurrence_count_student[cn] += 1
-                        
-                        if occurrence_index >= len(all_data_list):
-                            continue
-                        
-                        all_data = all_data_list[occurrence_index]
-                        
-                        # A열에 '증배' 확인
-                        a_col_for_check = 1 if year in [2026, 2025] else 2
-                        a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, a_col_for_check)
-                        has_jeungbae = a_col_value and '증배' in str(a_col_value)
-                        
-                        # 비교할 열 결정
-                        if year == 2026:
-                            src_cols = [2, 3, 5, 6, 7, 8, 15]
-                            dst_cols = [2, 3, 5, 6, 7, 8, 15]
-                        elif year == 2025:
-                            src_cols = [2, 3, 5, 6, 9, 10, 15]
-                            dst_cols = [2, 3, 5, 6, 9, 10, 15]
-                        else:  # 2024
-                            src_cols = [3, 4, 6, 7, 12, 13, 16]
-                            dst_cols = [2, 3, 5, 6, 11, 12, 15]
-                        
-                        # 각 열 비교
-                        for i, src_col in enumerate(src_cols):
-                            dst_col = dst_cols[i]
+                        merge_key = (r, r)
+                    
+                    if merge_key in processed_merges_student:
+                        continue
+                    
+                    processed_merges_student.add(merge_key)
+                    
+                    # 해당 병합 구간에서 check_col에 숫자가 있는지 확인
+                    has_number = False
+                    for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_real_end)):
+                        v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, check_col)
+                        if to_number(v) is not None:
+                            has_number = True
+                            break
+                    
+                    # 해당 병합 구간의 모든 과목 수집
+                    courses_in_merge_student = []  # (과목명, 행번호) 튜플 리스트
+                    # 병합 구간 전체에서 숫자가 하나라도 있으면, 병합 구간의 모든 행에서 과목 수집
+                    if has_number:
+                        for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_real_end)):
+                            c_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, student_course_col)
+                            if not c_raw or str(c_raw).strip() == "":
+                                continue
                             
-                            src_val, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, src_col)
-                            dst_val = all_data.get(dst_col)
+                            if any(keyword in str(c_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
+                                continue
                             
-                            # 문자열 비교
-                            if src_col in [2, 3] or dst_col in [2, 3]:
-                                if has_jeungbae and (src_col == 2 or dst_col == 2 or src_col == 3 or dst_col == 3):
-                                    is_gyogwa_col = (src_col == 2 or dst_col == 2) if year in [2026, 2025] else (src_col == 3 or dst_col == 3)
-                                    if is_gyogwa_col:
-                                        continue
+                            # 각 행의 check_col에 숫자가 있는지 확인하지 않고, 병합 구간 전체의 has_number 결과 사용
+                            normalized = normalize_course_name(c_raw)
+                            if normalized:
+                                courses_in_merge_student.append((normalized, rr))
+                    
+                    # 전학년 시트에 해당 과목들이 있는지 확인
+                    student_courses = student_courses_by_year.get(year, {}).get(col_key, {})
+                    
+                    for cn, course_row in courses_in_merge_student:
+                        if cn not in student_courses:
+                            # 각 열별로 적절한 열 이름 표시
+                            if year == 2026:
+                                col_name = "G열(1학년 1학기)" if col_key == 'G' else "H열(1학년 2학기)"
+                            elif year == 2025:
+                                col_name = "I열(2학년 1학기)" if col_key == 'I' else "J열(2학년 2학기)"
+                            else:  # 2024
+                                col_name = "K열(3학년 1학기)" if col_key == 'K' else "L열(3학년 2학기)"
+                            msg_line1 = f"'{sname}' 시트의 '{cn}' 과목({course_row}행, 학생 선택)이 '2026 전학년' 시트에 없습니다."
+                            msg_line2 = "선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요."
+                            issues.append({
+                                "severity": "ERROR",
+                                "sheet": all_grades_sheet,
+                                "row": "-",
+                                "message": msg_line1 + "\n" + msg_line2
+                            })
+                        else:
+                            # 순서 고려하여 매칭
+                            all_data_list = student_courses[cn]
+                            
+                            if cn not in course_occurrence_count_student:
+                                course_occurrence_count_student[cn] = 0
+                            occurrence_index = course_occurrence_count_student[cn]
+                            course_occurrence_count_student[cn] += 1
+                            
+                            if occurrence_index >= len(all_data_list):
+                                continue
+                            
+                            all_data = all_data_list[occurrence_index]
+                            
+                            # A열에 '증배' 확인
+                            a_col_for_check = 1 if year in [2026, 2025] else 2
+                            a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, a_col_for_check)
+                            has_jeungbae = a_col_value and '증배' in str(a_col_value)
+                            
+                            # 비교할 열 결정
+                            if year == 2026:
+                                # 2026년: G(7), H(8) 열 비교
+                                src_cols = [2, 3, 5, 6, check_col, 15]
+                                dst_cols = [2, 3, 5, 6, check_col, 15]
+                            elif year == 2025:
+                                # 2025년: I(9), J(10) 열 비교
+                                src_cols = [2, 3, 5, 6, check_col, 15]
+                                dst_cols = [2, 3, 5, 6, check_col, 15]
+                            else:  # 2024
+                                # 2024년: 입학생 시트 L(12), M(13) -> 전학년 시트 K(11), L(12)
+                                dst_check_col = 11 if check_col == 12 else 12  # 전학년 시트 열
+                                src_cols = [3, 4, 6, 7, check_col, 16]
+                                dst_cols = [2, 3, 5, 6, dst_check_col, 15]
+                            
+                            # 각 열 비교
+                            for i, src_col in enumerate(src_cols):
+                                dst_col = dst_cols[i]
                                 
-                                src_str = safe_strip(src_val)
-                                dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
+                                src_val, _, _ = get_value_with_merge(ws_v, ws_f, merge, course_row, src_col)
+                                dst_val = all_data.get(dst_col)
                                 
-                                if src_str != dst_str:
-                                    src_col_name = get_column_name(src_col, year)
-                                    dst_col_name = get_column_name(dst_col)
-                                    issues.append({
-                                        "severity": "ERROR",
-                                        "sheet": all_grades_sheet,
-                                        "row": all_data["row"],
-                                        "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
-                                    })
-                            # 성적처리 비교
-                            elif src_col == 15 or dst_col == 15 or src_col == 16 or dst_col == 16:
-                                src_str = safe_strip(src_val)
-                                dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
-                                
-                                if src_str != dst_str:
-                                    src_col_name = get_column_name(src_col, year)
-                                    dst_col_name = get_column_name(dst_col)
-                                    issues.append({
-                                        "severity": "ERROR",
-                                        "sheet": all_grades_sheet,
-                                        "row": all_data["row"],
-                                        "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
-                                    })
-                            # 숫자 비교
-                            else:
-                                src_num = to_number(src_val)
-                                dst_num = dst_val if isinstance(dst_val, (int, float)) else to_number(dst_val)
-                                
-                                if src_num is not None and dst_num is not None:
-                                    if abs(src_num - dst_num) > EPS:
+                                # 문자열 비교
+                                if src_col in [2, 3] or dst_col in [2, 3]:
+                                    if has_jeungbae and (src_col == 2 or dst_col == 2 or (year == 2024 and (src_col == 3 or dst_col == 3))):
+                                        is_gyogwa_col = (src_col == 2 or dst_col == 2) if year in [2026, 2025] else (src_col == 3 or dst_col == 3)
+                                        if is_gyogwa_col:
+                                            continue
+                                    
+                                    src_str = safe_strip(src_val)
+                                    dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
+                                    
+                                    if src_str != dst_str:
+                                        src_col_name = get_column_name(src_col, year)
+                                        dst_col_name = get_column_name(dst_col)
+                                        issues.append({
+                                            "severity": "ERROR",
+                                            "sheet": all_grades_sheet,
+                                            "row": all_data["row"],
+                                            "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
+                                        })
+                                # 성적처리 비교
+                                elif src_col == 15 or dst_col == 15 or src_col == 16 or dst_col == 16:
+                                    src_str = safe_strip(src_val)
+                                    dst_str = safe_strip(dst_val) if isinstance(dst_val, str) else str(dst_val) if dst_val is not None else ""
+                                    
+                                    if src_str != dst_str:
+                                        src_col_name = get_column_name(src_col, year)
+                                        dst_col_name = get_column_name(dst_col)
+                                        issues.append({
+                                            "severity": "ERROR",
+                                            "sheet": all_grades_sheet,
+                                            "row": all_data["row"],
+                                            "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}('{src_str}')과 '2026 전학년' 시트의 {dst_col_name}('{dst_str}')이 일치하지 않습니다."
+                                        })
+                                # 숫자 비교
+                                else:
+                                    src_num = to_number(src_val)
+                                    dst_num = dst_val if isinstance(dst_val, (int, float)) else to_number(dst_val)
+                                    
+                                    if src_num is not None and dst_num is not None:
+                                        if abs(src_num - dst_num) > EPS:
+                                            src_col_name = get_column_name(src_col, year)
+                                            dst_col_name = get_column_name(dst_col)
+                                            src_num_str = format_number(src_num)
+                                            dst_num_str = format_number(dst_num)
+                                            issues.append({
+                                                "severity": "ERROR",
+                                                "sheet": all_grades_sheet,
+                                                "row": all_data["row"],
+                                                "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트 {all_data['row']}행의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
+                                            })
+                                    elif src_num is not None or dst_num is not None:
                                         src_col_name = get_column_name(src_col, year)
                                         dst_col_name = get_column_name(dst_col)
                                         src_num_str = format_number(src_num)
@@ -1212,87 +1266,129 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                                             "severity": "ERROR",
                                             "sheet": all_grades_sheet,
                                             "row": all_data["row"],
-                                            "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
+                                            "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트 {all_data['row']}행의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
                                         })
-                                elif src_num is not None or dst_num is not None:
-                                    src_col_name = get_column_name(src_col, year)
-                                    dst_col_name = get_column_name(dst_col)
-                                    src_num_str = format_number(src_num)
-                                    dst_num_str = format_number(dst_num)
-                                    issues.append({
-                                        "severity": "ERROR",
-                                        "sheet": all_grades_sheet,
-                                        "row": all_data["row"],
-                                        "message": f"'{sname}' 시트 {course_row}행의 {src_col_name}({src_num_str})과 '2026 전학년' 시트의 {dst_col_name}({dst_num_str})이 일치하지 않습니다."
-                                    })
         
         # 역방향 검증: '2026 전학년' 시트의 학생 선택 과목이 입학생 시트에 없는 경우
         for year in [2026, 2025, 2024]:
-            student_courses = student_courses_by_year.get(year, {})
-            
-            if year not in sheets_data:
-                continue
-            
-            sheet_data = sheets_data[year]
-            ws_v, ws_f, merge = sheet_data["ws_v"], sheet_data["ws_f"], sheet_data["merge"]
-            sname = sheet_data["name"]
-            
-            # 마커 찾기
-            marker_row_src = find_marker_row(ws_v, ws_f, merge, "학교지정과목교과편성")
-            if not marker_row_src:
-                continue
-            
-            marker_row_student_end = find_marker_row(ws_v, ws_f, merge, "학생선택과목교과편성")
-            if not marker_row_student_end:
-                marker_row_student_end = ws_v.max_row + 1
-            
-            # 검사할 열 결정 (입학생 시트의 학기 열)
+            # 모든 학년을 각 열별로 처리
             if year == 2026:
-                check_cols = [7, 8]  # G, H (2026 입학생 시트)
-                student_course_col = 4  # D열
+                col_keys = ['G', 'H']
             elif year == 2025:
-                check_cols = [9, 10]  # I, J (2025 입학생 시트)
-                student_course_col = 4  # D열
+                col_keys = ['I', 'J']
             else:  # 2024
-                check_cols = [12, 13]  # L, M (2024 입학생 시트)
-                student_course_col = 5  # E열 (2024는 과목명이 E열)
+                col_keys = ['K', 'L']
             
-            # 전학년 시트에 있는 학생 선택 과목이 입학생 시트에 있는지 확인 (순서 고려)
-            for course_norm, row_data_list in student_courses.items():
-                # 전학년 시트에서 해당 과목이 몇 번 나오는지 확인
-                expected_count = len(row_data_list)
-                
-                # 입학생 시트에서 해당 과목이 몇 번 나오는지 확인
-                found_count = 0
-                for r in range(marker_row_src + 1, marker_row_student_end):
-                    course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, student_course_col)
-                    if not course_raw:
+            for col_key in col_keys:
+                    student_courses = student_courses_by_year.get(year, {}).get(col_key, {})
+                    
+                    if year not in sheets_data:
                         continue
                     
-                    if normalize_course_name(course_raw) == course_norm:
-                        # 해당 행에 check_cols에 숫자가 있는지 확인
+                    sheet_data = sheets_data[year]
+                    ws_v, ws_f, merge = sheet_data["ws_v"], sheet_data["ws_f"], sheet_data["merge"]
+                    sname = sheet_data["name"]
+                    
+                    # 마커 찾기
+                    marker_row_src = find_marker_row(ws_v, ws_f, merge, "학교지정과목교과편성")
+                    if not marker_row_src:
+                        continue
+                    
+                    marker_row_student_end = find_marker_row(ws_v, ws_f, merge, "학생선택과목교과편성")
+                    if not marker_row_student_end:
+                        marker_row_student_end = ws_v.max_row + 1
+                    
+                    # 검사할 열 결정 (입학생 시트의 학기 열)
+                    if year == 2026:
+                        check_col = 7 if col_key == 'G' else 8  # G열(7) 또는 H열(8)
+                        student_course_col = 4  # D열
+                        a_col = 1  # A열
+                    elif year == 2025:
+                        check_col = 9 if col_key == 'I' else 10  # I열(9) 또는 J열(10)
+                        student_course_col = 4  # D열
+                        a_col = 1  # A열
+                    else:  # 2024
+                        # 입학생 시트 L(12) -> 전학년 시트 K(11), 입학생 시트 M(13) -> 전학년 시트 L(12)
+                        check_col = 12 if col_key == 'K' else 13  # L열(12) 또는 M열(13)
+                        student_course_col = 5  # E열
+                        a_col = 2  # B열
+                    processed_merges = set()
+                    
+                    # 입학생 시트에서 수집된 과목명 딕셔너리 (과목명별 출현 횟수 추적)
+                    collected_courses_count = {}  # {과목명: 출현횟수}
+                    
+                    # 입학생 시트에서 과목 수집
+                    for r in range(marker_row_src + 1, marker_row_student_end):
+                        # A열 병합 확인
+                        key = (r, a_col)
+                        if key in merge:
+                            min_row, _, max_row, _ = merge[key]
+                            a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                            if a_col_value and '증배' in str(a_col_value):
+                                merge_key = (r, r)
+                            else:
+                                merge_key = (min_row, max_row)
+                        else:
+                            merge_key = (r, r)
+                        
+                        if merge_key in processed_merges:
+                            continue
+                        
+                        processed_merges.add(merge_key)
+                        
+                        # 해당 병합 구간에서 check_col에 숫자가 있는지 확인
                         has_number = False
-                        for col in check_cols:
-                            v, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, col)
+                        for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
+                            v, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, check_col)
                             if to_number(v) is not None:
                                 has_number = True
                                 break
                         
+                        # 병합 구간 내의 모든 D열 과목명 수집 (순번 추적)
+                        # 병합 구간 전체에서 숫자가 하나라도 있으면, 병합 구간의 모든 행에서 과목 수집
                         if has_number:
-                            found_count += 1
-                
-                # 개수 비교
-                if found_count < expected_count:
-                    # 학년 계산
-                    grade = 2027 - year
-                    # 부족한 개수만큼 오류 발생 (첫 번째 row_data의 행 번호 사용)
-                    row_data = row_data_list[0]
-                    issues.append({
-                        "severity": "ERROR",
-                        "sheet": all_grades_sheet,
-                        "row": row_data["row"],
-                        "message": f"'2026 전학년' 시트의 '{course_norm}' 과목(학생 선택)이 '{sname}' 시트의 해당 학년({grade}학년) 열에 {expected_count}번 나타나야 하는데 {found_count}번만 나타납니다."
-                    })
+                            for rr in range(merge_key[0], min(merge_key[1] + 1, marker_row_student_end)):
+                                course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, rr, student_course_col)
+                                if not course_raw or str(course_raw).strip() == "":
+                                    continue
+                                
+                                # 총계 행 같은 키워드가 포함된 경우 제외
+                                if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
+                                    continue
+                                
+                                # 각 행의 check_col에 숫자가 있는지 확인하지 않고, 병합 구간 전체의 has_number 결과 사용
+                                normalized = normalize_course_name(course_raw)
+                                if normalized:  # 빈 문자열이 아닌 경우만 추가
+                                    # 순번 추적: 같은 과목명이 여러 번 나올 수 있으므로 출현 횟수 추적
+                                    if normalized not in collected_courses_count:
+                                        collected_courses_count[normalized] = 0
+                                    collected_courses_count[normalized] += 1
+                    
+                    # 전학년 시트의 각 과목명이 입학생 시트에 있는지 확인 (순번 고려)
+                    for course_norm, row_data_list in student_courses.items():
+                        # 전학년 시트에서 해당 과목이 몇 번 나오는지 확인
+                        expected_count = len(row_data_list)
+                        
+                        # 입학생 시트에서 해당 과목이 몇 번 나왔는지 확인
+                        found_count = collected_courses_count.get(course_norm, 0)
+                        
+                        # 전학년 시트의 각 순번별로 입학생 시트에 있는지 확인
+                        for occurrence_index, row_data in enumerate(row_data_list):
+                            # 해당 순번의 과목이 입학생 시트에 있는지 확인
+                            if found_count <= occurrence_index:
+                                # 각 열별로 적절한 열 이름 표시
+                                if year == 2026:
+                                    col_name = "G열(1학년 1학기)" if col_key == 'G' else "H열(1학년 2학기)"
+                                elif year == 2025:
+                                    col_name = "I열(2학년 1학기)" if col_key == 'I' else "J열(2학년 2학기)"
+                                else:  # 2024
+                                    col_name = "K열(3학년 1학기)" if col_key == 'K' else "L열(3학년 2학기)"
+                                issues.append({
+                                    "severity": "ERROR",
+                                    "sheet": all_grades_sheet,
+                                    "row": row_data["row"],
+                                    "message": f"'2026 전학년' 시트의 '{course_norm}'({row_data['row']}행)이 '{sname}' 시트의 {col_name}에 없습니다."
+                                })
     
     # =========================
     # 3. '2026 전학년' 시트 총계 행 합계 검증
@@ -3362,7 +3458,7 @@ class App:
             # 2026 전학년 시트인 경우 안내 메시지 출력
             if tab_name == all_grades_sheet and all_grades_sheet:
                 self._w(tab_name, "[안내]\n", "HEADER")
-                self._w(tab_name, "개설 여부는 프로그램 상 확인 절차가 따로 없습니다. 선택군은 학년별로 다르게 정리해주세요.\n\n", "INFO")
+                self._w(tab_name, "개설 여부는 프로그램 상 확인 절차가 따로 없습니다. 선택군은 학년별로 다르게 정리하여 병합해해주세요.\n\n", "INFO")
 
         # 각 시트 탭에 출력
         for sheet, items in groups.items():
@@ -3459,33 +3555,55 @@ class App:
                     import re
                     missing_course_pattern = r"'([^']+)'\s*시트.*?'([^']+)'\s*과목이\s*'2026\s*전학년'\s*시트에\s*없습니다"
                     missing_with_row_pattern = r"'([^']+)'\s*시트\s*(\d+)행의\s*'([^']+)'\s*과목이\s*'2026\s*전학년'\s*시트에\s*없습니다"
+                    # 학생 선택 과목 패턴: '{시트명}' 시트의 '{과목명}' 과목({행번호}행[,...])이 '2026 전학년' 시트의 {열명}에 없습니다.
+                    student_missing_pattern = r"'([^']+)'\s*시트의\s*'([^']+)'\s*과목\((\d+)행[^)]*\)이\s*'2026\s*전학년'\s*시트의\s*[^에]+에\s*없습니다"
                     
-                    # 시트별로 그룹핑
+                    # 시트별로 그룹핑 (학교 지정/학생 선택 구분)
                     sheet_groups = {}
                     other_items = []
                     
                     for it in row_items:
                         msg = it.get("message", "")
                         
-                        # 행 번호 있는 패턴
+                        # 학생 선택 과목 패턴 (학교 지정과 학생 선택 사이 영역 또는 학생 선택 영역)
+                        match = re.search(student_missing_pattern, msg)
+                        if match:
+                            source_sheet = match.group(1)
+                            course = match.group(2)
+                            row_no = match.group(3)
+                            if source_sheet not in sheet_groups:
+                                sheet_groups[source_sheet] = {
+                                    "school": {"with_row": [], "without_row": []},
+                                    "student": {"with_row": [], "without_row": []}
+                                }
+                            sheet_groups[source_sheet]["student"]["with_row"].append((course, row_no, it))
+                            continue
+                        
+                        # 행 번호 있는 패턴 (학교 지정 과목)
                         match = re.search(missing_with_row_pattern, msg)
                         if match:
                             source_sheet = match.group(1)
                             row_no = match.group(2)
                             course = match.group(3)
                             if source_sheet not in sheet_groups:
-                                sheet_groups[source_sheet] = {"with_row": [], "without_row": []}
-                            sheet_groups[source_sheet]["with_row"].append((course, row_no, it))
+                                sheet_groups[source_sheet] = {
+                                    "school": {"with_row": [], "without_row": []},
+                                    "student": {"with_row": [], "without_row": []}
+                                }
+                            sheet_groups[source_sheet]["school"]["with_row"].append((course, row_no, it))
                             continue
                         
-                        # 행 번호 없는 패턴
+                        # 행 번호 없는 패턴 (학교 지정 과목)
                         match = re.search(missing_course_pattern, msg)
                         if match:
                             source_sheet = match.group(1)
                             course = match.group(2)
                             if source_sheet not in sheet_groups:
-                                sheet_groups[source_sheet] = {"with_row": [], "without_row": []}
-                            sheet_groups[source_sheet]["without_row"].append((course, it))
+                                sheet_groups[source_sheet] = {
+                                    "school": {"with_row": [], "without_row": []},
+                                    "student": {"with_row": [], "without_row": []}
+                                }
+                            sheet_groups[source_sheet]["school"]["without_row"].append((course, it))
                             continue
                         
                         # 패턴에 맞지 않는 기타 오류
@@ -3495,20 +3613,44 @@ class App:
                     for source_sheet in sorted(sheet_groups.keys()):
                         data = sheet_groups[source_sheet]
                         
-                        self._w(tab, f"\n▶ '{source_sheet}'에 있지만, '2026 전학년' 시트에 없는 과목\n", "COURSE")
-                        self._w(tab, "─" * 80 + "\n", "INFO")
+                        has_school = data["school"]["with_row"] or data["school"]["without_row"]
+                        has_student = data["student"]["with_row"] or data["student"]["without_row"]
                         
-                        # 행 번호 있는 것들
-                        for course, row_no, it in data["with_row"]:
-                            sev = it.get("severity", "INFO")
-                            self._w(tab, f"  [{sev}] {course} ({row_no}행)\n", 
-                                   sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                        # 학교 지정 과목 또는 학생 선택 과목이 있으면 제목 출력 (한 번만)
+                        if has_school or has_student:
+                            self._w(tab, f"\n▶ '{source_sheet}'에 있지만, '2026 전학년' 시트에 없는 과목\n", "COURSE")
+                            self._w(tab, "─" * 80 + "\n", "INFO")
                         
-                        # 행 번호 없는 것들
-                        for course, it in data["without_row"]:
-                            sev = it.get("severity", "INFO")
-                            self._w(tab, f"  [{sev}] {course}\n", 
-                                   sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                        # 학교 지정 과목 출력
+                        if has_school:
+                            # 행 번호 있는 것들
+                            for course, row_no, it in data["school"]["with_row"]:
+                                sev = it.get("severity", "INFO")
+                                self._w(tab, f"  [{sev}] {course} ({row_no}행)\n", 
+                                       sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                            
+                            # 행 번호 없는 것들
+                            for course, it in data["school"]["without_row"]:
+                                sev = it.get("severity", "INFO")
+                                self._w(tab, f"  [{sev}] {course}\n", 
+                                       sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                        
+                        # 학생 선택 과목 출력
+                        if has_student:
+                            # 행 번호 있는 것들
+                            for course, row_no, it in data["student"]["with_row"]:
+                                sev = it.get("severity", "INFO")
+                                self._w(tab, f"  [{sev}] {course} ({row_no}행)\n", 
+                                       sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                            
+                            # 행 번호 없는 것들
+                            for course, it in data["student"]["without_row"]:
+                                sev = it.get("severity", "INFO")
+                                self._w(tab, f"  [{sev}] {course}\n", 
+                                       sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO")
+                            
+                            # 학생 선택 과목 목록 마지막에 안내 문구 한 번만 추가
+                            self._w(tab, "      선택 미달 등으로 개설되지 않은 경우도 2026 전학년 시트에 추가해주세요.\n", "INFO")
                     
                     # 기타 오류들
                     if other_items:

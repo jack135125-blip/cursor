@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['curriculum_checker_12.26_테스트용 수정(1.2) copy.py'],
+    ['curriculum_checker_12.26_테스트용 수정(1.3).py'],
     pathex=[],
     binaries=[],
     datas=[],

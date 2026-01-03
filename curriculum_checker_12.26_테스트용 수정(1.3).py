@@ -44,10 +44,10 @@ GOOGLE_SHEET_ID = "1BaTm1J34hep9QV8fswwPfcfCZX-geGtanLwX9BkhCyU"
 def load_workbook_from_google_sheet(spreadsheet_id: str, timeout=10):
     """
     구글 스프레드시트에서 Excel 형식으로 다운로드하여 workbook 반환
-    return: (wb_data_only, wb_formula) 또는 (None, None)
+    return: (wb_data_only, wb_formula, error_msg) 또는 (None, None, error_msg)
     """
     if not REQUESTS_AVAILABLE:
-        return None, None
+        return None, None, "온라인 데이터 참조 기능을 사용할 수 없습니다."
     
     export_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=xlsx"
     
@@ -58,11 +58,19 @@ def load_workbook_from_google_sheet(spreadsheet_id: str, timeout=10):
             wb_v = load_workbook(BytesIO(response.content), data_only=True)
             # data_only=False (수식 포함)
             wb_f = load_workbook(BytesIO(response.content), data_only=False)
-            return wb_v, wb_f
-    except Exception:
-        pass
+            return wb_v, wb_f, None
+        else:
+            return None, None, f"구글 스프레드시트 다운로드 실패 (HTTP 상태 코드: {response.status_code})"
+    except requests.exceptions.Timeout:
+        return None, None, f"구글 스프레드시트 연결 시간 초과 (타임아웃: {timeout}초). 인터넷 연결을 확인해주세요."
+    except requests.exceptions.ConnectionError:
+        return None, None, "구글 스프레드시트에 연결할 수 없습니다. 인터넷 연결을 확인해주세요."
+    except requests.exceptions.RequestException as e:
+        return None, None, f"구글 스프레드시트 요청 중 오류 발생: {str(e)}"
+    except Exception as e:
+        return None, None, f"구글 스프레드시트 처리 중 예상치 못한 오류 발생: {str(e)}"
     
-    return None, None
+    return None, None, "알 수 없는 오류가 발생했습니다."
 
 
 def normalize_course_name(name: str) -> str:
@@ -154,10 +162,10 @@ def load_reference_sheets_from_google():
     구글 스프레드시트에서 '숨김', '전문교과목록' 시트 로드
     return: (wb_v, wb_f, success, error_msg)
     """
-    wb_v, wb_f = load_workbook_from_google_sheet(GOOGLE_SHEET_ID, timeout=10)
+    wb_v, wb_f, error_msg = load_workbook_from_google_sheet(GOOGLE_SHEET_ID, timeout=10)
     
     if wb_v is None or wb_f is None:
-        return None, None, False, "온라인 데이터에 연결할 수 없습니다."
+        return None, None, False, error_msg or "온라인 데이터에 연결할 수 없습니다."
     
     sheetnames = wb_v.sheetnames
     has_hidden = "숨김" in sheetnames
@@ -215,71 +223,6 @@ def safe_strip(v):
     if v is None:
         return ""
     return str(v).strip()
-
-
-def is_colored_fill(cell) -> bool:
-    """
-    '색깔이 있는 경우' 판단:
-    - 패턴이 있고(대개 solid), 흰색이 아닌 채우기면 True
-    - theme/indexed 등 RGB가 애매한 경우도 색으로 간주(보수적으로 제외)
-    """
-    try:
-        fill = cell.fill
-    except Exception:
-        return False
-
-    if fill is None:
-        return False
-
-    pt = getattr(fill, "patternType", None)
-    if pt is None or str(pt).lower() in ("none", "null"):
-        return False
-
-    fg = getattr(fill, "fgColor", None)
-    if fg is None:
-        return True
-
-    ctype = getattr(fg, "type", None)
-    val = getattr(fg, "value", None) or getattr(fg, "rgb", None)
-
-    if ctype in ("theme", "indexed"):
-        return True
-
-    if not val:
-        return True
-
-    s = str(val).upper()
-    if len(s) >= 6 and s[-6:] == "FFFFFF":
-        return False
-    if s in ("00000000", "000000", "FFFFFFFF", "00FFFFFF", "FFFFFF"):
-        return False
-
-    return True
-
-
-def is_course_cell_colored(ws_f, merge_lookup, row, col) -> bool:
-    """
-    과목명 셀(D)에 색이 있는지 판단:
-    - (row, col)이 병합 셀인 경우: 병합 top-left 셀의 fill을 함께 확인
-    - (row, col) 자체 fill도 확인
-    """
-    colored = False
-    # D 셀 자체
-    try:
-        colored = colored or is_colored_fill(ws_f.cell(row, col))
-    except Exception:
-        pass
-
-    # 병합 top-left
-    key = (row, col)
-    if key in merge_lookup:
-        min_row, min_col, _, _ = merge_lookup[key]
-        try:
-            colored = colored or is_colored_fill(ws_f.cell(min_row, min_col))
-        except Exception:
-            pass
-
-    return colored
 
 
 # =========================
@@ -392,12 +335,13 @@ def format_number(num):
     return str(num)
 
 
-def check_all_grades_sheet(wb_v, wb_f, targets, issues):
+def check_all_grades_sheet(wb_v, wb_f, targets, issues, hidden=None, vocational_courses=None, new_courses=None, hidden_list_norm=None):
     """
     '2026 전학년' 시트 검증
     - 전학년 시트와 2026 입학생 시트: G, H열 비교 (1학년)
     - 전학년 시트와 2025 입학생 시트: I, J열 비교 (2학년)
     - 전학년 시트 K, L열과 2024 입학생 시트 L, M열 비교 (3학년)
+    - 전학년 시트의 '증배' 관련 과목 검증
     """
     sheetnames = wb_v.sheetnames
     all_grades_sheet = find_all_grades_sheet(sheetnames)
@@ -441,6 +385,11 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
         all_grades_courses = {}  # {과목명_정규화: [{row, B~L열, O열 값}, ...]}
         
         for r in range(5, marker_row_all):
+            # A열에 '증배'가 포함되어 있는지 확인 (교차 점검 제외)
+            a_col_value, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 1)
+            if a_col_value and '증배' in str(a_col_value):
+                continue
+            
             course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 4)  # D열
             if not course_raw or str(course_raw).strip() == "":
                 continue
@@ -496,7 +445,15 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             # 행별 검사 - 같은 과목명의 행 순서를 추적
             course_row_index = {}  # {과목명: 현재 인덱스}
             
+            # A열(또는 B열) 확인용
+            a_col = 1 if year in [2026, 2025] else 2
+            
             for r in range(5, marker_row_src):
+                # A열(또는 B열)에 '증배'가 포함되어 있는지 확인 (교차 점검 제외)
+                a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                if a_col_value and '증배' in str(a_col_value):
+                    continue
+                
                 course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, course_col)
                 if not course_raw or str(course_raw).strip() == "":
                     continue
@@ -607,6 +564,12 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             if not data_list:
                 continue
             
+            # 전학년 시트의 첫 번째 행에서 A열에 '증배'가 있는지 확인 (교차 점검 제외)
+            first_data = data_list[0]
+            a_col_value, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, first_data["row"], 1)
+            if a_col_value and '증배' in str(a_col_value):
+                continue
+            
             found_in_any = False
             
             for year in [2026, 2025, 2024]:
@@ -632,8 +595,16 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                     check_cols = [12, 13]  # L, M열 (2024는 H~M이 학기별 열이므로 3학년은 L, M)
                     rev_course_col = 5  # E열 (2024는 과목명이 E열에 있음)
                 
+                # A열(또는 B열) 확인용
+                a_col = 1 if year in [2026, 2025] else 2
+                
                 # 입학생 시트에서 해당 과목이 check_cols에 숫자가 있는지 확인
                 for r in range(5, marker_row_src):
+                    # A열(또는 B열)에 '증배'가 포함되어 있는지 확인 (교차 점검 제외)
+                    a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                    if a_col_value and '증배' in str(a_col_value):
+                        continue
+                    
                     course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, rev_course_col)
                     if not course_raw:
                         continue
@@ -693,11 +664,15 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 # A열 병합에 '증배'가 포함되어 있는지 확인
                 a_col_value, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 1)
                 if a_col_value and '증배' in str(a_col_value):
-                    # '증배'가 있으면 병합으로 판단하지 않음
-                    merge_key = (r, r)
+                    # '증배'가 있으면 교차 점검 제외
+                    continue
                 else:
                     merge_key = (min_row, max_row)
             else:
+                # A열에 '증배'가 포함되어 있는지 확인 (교차 점검 제외)
+                a_col_value, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, r, 1)
+                if a_col_value and '증배' in str(a_col_value):
+                    continue
                 merge_key = (r, r)
             
             if merge_key in processed_merges_all:
@@ -856,6 +831,24 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                     processed_merges = set()
                     
                     for r in range(marker_row_src + 1, marker_row_student_end):
+                        # A열(또는 B열) 병합 확인
+                        key = (r, a_col)
+                        if key in merge:
+                            min_row, _, max_row, _ = merge[key]
+                            # A열 병합에 '증배'가 포함되어 있는지 확인
+                            a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                            if a_col_value and '증배' in str(a_col_value):
+                                # '증배'가 있으면 교차 점검 제외
+                                continue
+                            else:
+                                merge_key = (min_row, max_row)
+                        else:
+                            # A열(또는 B열)에 '증배'가 포함되어 있는지 확인 (교차 점검 제외)
+                            a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                            if a_col_value and '증배' in str(a_col_value):
+                                continue
+                            merge_key = (r, r)
+                        
                         course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, student_course_col)
                         if not course_raw or str(course_raw).strip() == "":
                             continue
@@ -872,19 +865,6 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                         # 총계 행 같은 키워드가 포함된 경우 제외
                         if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
                             continue
-                        
-                        # A열(또는 B열) 병합 확인
-                        key = (r, a_col)
-                        if key in merge:
-                            min_row, _, max_row, _ = merge[key]
-                            # A열 병합에 '증배'가 포함되어 있는지 확인
-                            a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
-                            if a_col_value and '증배' in str(a_col_value):
-                                merge_key = (r, r)
-                            else:
-                                merge_key = (min_row, max_row)
-                        else:
-                            merge_key = (r, r)
                         
                         if merge_key in processed_merges:
                             continue
@@ -1110,10 +1090,15 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                         min_row, _, max_row, _ = merge[key]
                         a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
                         if a_col_value and '증배' in str(a_col_value):
-                            merge_key = (r, r)
+                            # '증배'가 있으면 교차 점검 제외
+                            continue
                         else:
                             merge_key = (min_row, max_row)
                     else:
+                        # A열(또는 B열)에 '증배'가 포함되어 있는지 확인 (교차 점검 제외)
+                        a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                        if a_col_value and '증배' in str(a_col_value):
+                            continue
                         merge_key = (r, r)
                     
                     if merge_key in processed_merges_student:
@@ -1325,10 +1310,15 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                             min_row, _, max_row, _ = merge[key]
                             a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
                             if a_col_value and '증배' in str(a_col_value):
-                                merge_key = (r, r)
+                                # '증배'가 있으면 교차 점검 제외
+                                continue
                             else:
                                 merge_key = (min_row, max_row)
                         else:
+                            # A열(또는 B열)에 '증배'가 포함되어 있는지 확인 (교차 점검 제외)
+                            a_col_value, _, _ = get_value_with_merge(ws_v, ws_f, merge, r, a_col)
+                            if a_col_value and '증배' in str(a_col_value):
+                                continue
                             merge_key = (r, r)
                         
                         if merge_key in processed_merges:
@@ -1366,6 +1356,13 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                     
                     # 전학년 시트의 각 과목명이 입학생 시트에 있는지 확인 (순번 고려)
                     for course_norm, row_data_list in student_courses.items():
+                        # 전학년 시트의 첫 번째 행에서 A열에 '증배'가 있는지 확인 (교차 점검 제외)
+                        if row_data_list:
+                            first_row_data = row_data_list[0]
+                            a_col_value, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, first_row_data["row"], 1)
+                            if a_col_value and '증배' in str(a_col_value):
+                                continue
+                        
                         # 전학년 시트에서 해당 과목이 몇 번 나오는지 확인
                         expected_count = len(row_data_list)
                         
@@ -1417,6 +1414,15 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
         # 총계/합계 행 식별 (검사 제외 대상)
         exempt_rows = set()
         for rr in range(first_row, last_row + 1):
+            # D열 병합 확인
+            d_key = (rr, course_col)
+            if d_key in merge_all:
+                min_row, _, max_row, _ = merge_all[d_key]
+                # 병합된 경우, 최상단 행의 값만 확인 (병합된 영역의 모든 행이 같은 값)
+                if rr != min_row:
+                    # 병합된 영역의 하위 행은 건너뛰기 (최상단 행에서만 확인)
+                    continue
+            
             course_v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, course_col)
             if course_v:
                 course_str = str(course_v).strip().replace(" ", "")
@@ -1424,7 +1430,13 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 if any(keyword in course_str for keyword in [
                     "편성학점", "총교과", "창의적체험활동", "편성학점수"
                 ]):
-                    exempt_rows.add(rr)
+                    # 병합된 경우, 병합된 모든 행을 exempt_rows에 추가
+                    if d_key in merge_all:
+                        min_row, _, max_row, _ = merge_all[d_key]
+                        for exempt_rr in range(min_row, max_row + 1):
+                            exempt_rows.add(exempt_rr)
+                    else:
+                        exempt_rows.add(rr)
         
         # A열에서 총계 행들 찾기 (필수 셀 존재 여부 확인)
         total_rows = {}  # {"학교지정": row, "학생선택": row, "총교과": row, "창의적": row, "편성학점수": row}
@@ -1744,6 +1756,276 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                         "message": f"편성 학점 수 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값(총교과+창의적)={expected_sum:g}"
                     })
 
+    # =========================
+    # 4. '2026 전학년' 시트 증배 과목 검증
+    # =========================
+    
+    # hidden 데이터가 없으면 증배 검증을 수행하지 않음
+    if hidden is None or vocational_courses is None or new_courses is None or hidden_list_norm is None:
+        return
+    
+    # 증배 관련 행 수집
+    jeungbae_rows = []  # 검증 대상 행 리스트
+    
+    # 마지막 행 찾기 (이미 위에서 찾았지만, 다시 확인)
+    if last_row is None:
+        for rr in range(ws_all_f.max_row, first_row - 1, -1):
+            v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, course_col)
+            if v is not None and str(v).strip() != "":
+                last_row = rr
+                break
+    
+    if last_row is None:
+        return  # 데이터가 없으면 검증하지 않음
+    
+    # 증배 관련 행 찾기
+    processed_a_merges = set()  # 처리된 A열 병합 영역 추적
+    
+    for rr in range(first_row, last_row + 1):
+        if rr in exempt_rows:
+            continue  # 총계 행은 제외
+        
+        # A열 병합 확인
+        a_key = (rr, 1)  # A열
+        rows_to_check = []
+        
+        if a_key in merge_all:
+            # 병합된 경우: 병합된 영역의 모든 행 확인
+            min_row, _, max_row, _ = merge_all[a_key]
+            merge_key = (min_row, max_row)
+            
+            # 이미 처리한 병합 영역은 건너뛰기
+            if merge_key in processed_a_merges:
+                continue
+            processed_a_merges.add(merge_key)
+            
+            # 병합된 영역의 최상단 행에서 '증배' 확인
+            a_col_value, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, min_row, 1)
+            
+            if a_col_value and '증배' in str(a_col_value):
+                # 병합된 모든 행을 검증 대상에 추가
+                rows_to_check = list(range(min_row, max_row + 1))
+        else:
+            # 병합되지 않은 경우: 해당 행만 확인
+            a_col_value, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 1)
+            if a_col_value and '증배' in str(a_col_value):
+                rows_to_check = [rr]
+        
+        # 각 행마다 K, L열 확인 및 검증 대상 추가
+        for check_row in rows_to_check:
+            if check_row in exempt_rows:
+                continue
+            
+            # K열(11) 또는 L열(12)에 숫자가 있는지 확인
+            k_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, check_row, 11)  # K열
+            l_val, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, check_row, 12)  # L열
+            
+            if to_number(k_val) is not None or to_number(l_val) is not None:
+                continue  # K 또는 L열에 숫자가 있으면 검증 제외
+            
+            # 검증 대상으로 추가
+            jeungbae_rows.append(check_row)
+    
+    # 각 증배 행에 대해 검증 수행
+    for rr in jeungbae_rows:
+        # 과목명 읽기
+        course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, course_col)
+        if course_raw is None or str(course_raw).strip() == "":
+            continue
+        
+        if is_error_token(course_raw):
+            continue
+        
+        course_norm = normalize_course_name(course_raw)
+        if course_norm == "":
+            issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": "과목명(D열)에서 괄호 제거 후 이름이 비었습니다."})
+            if rr >= 109 and rr <= 116:
+                print(f"DEBUG [증배검증]: 행 {rr} 과목명 정규화 후 비어있어 오류 추가")
+            continue
+        
+        # 과목명 검증 (입학생 시트와 동일한 로직)
+        parts = split_bidirectional(course_norm)
+        is_bidirectional = len(parts) >= 2
+        
+        hidden_rec = None
+        
+        if is_bidirectional:
+            missing = [p for p in parts if p not in hidden]
+            if missing:
+                # 전문교과목록에서 확인
+                missing_not_in_vocational = [m for m in missing if m not in vocational_courses]
+                missing_in_vocational = [m for m in missing if m in vocational_courses]
+                
+                # 신설교과에서 확인
+                missing_not_in_new = [m for m in missing_not_in_vocational if m not in new_courses]
+                missing_in_new = [m for m in missing_not_in_vocational if m in new_courses]
+                
+                if missing_in_vocational:
+                    issues.append({"severity": "CHECK", "sheet": all_grades_sheet, "row": rr, "message": f"일반고에서 전문교과의 경우는 진로로 편성할 수 있습니다. (과목명: {', '.join(missing_in_vocational)})"})
+                
+                if missing_in_new:
+                    for new_course in missing_in_new:
+                        msg_line1 = f"'{new_course}'은(는) 교육과정에 표시되지 않은 교과목 중 신설 승인이 된 과목입니다."
+                        msg_line2 = "      각 학교에서 해당 교과목을 편성하기 위해서는 교육청에 사용 승인을 받아야 합니다."
+                        issues.append({
+                            "severity": "CHECK", 
+                            "sheet": all_grades_sheet, 
+                            "row": rr, 
+                            "message": msg_line1 + "\n" + msg_line2
+                        })
+                
+                if missing_not_in_new:
+                    hints = []
+                    for m in missing_not_in_new:
+                        close = difflib.get_close_matches(m, hidden_list_norm, n=1, cutoff=0.6)
+                        if close:
+                            hints.append(f"{m}→{close[0]}")
+                    hint_txt = f" (유사 후보: {', '.join(hints)})" if hints else ""
+                    issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"↔ 과목명 중 지침에 없는 항목: {', '.join(missing_not_in_new)}{hint_txt}"})
+            
+            
+        else:
+            if course_norm not in hidden:
+                # 전문교과목록 시트에서 확인
+                if course_norm in vocational_courses:
+                    issues.append({"severity": "CHECK", "sheet": all_grades_sheet, "row": rr, "message": f"일반고에서 전문교과의 경우는 진로로 편성할 수 있습니다. (과목명: '{course_norm}')"})
+                    hidden_rec = None
+                # 신설교과 시트에서 확인
+                elif course_norm in new_courses:
+                    issues.append({"severity": "CHECK", "sheet": all_grades_sheet, "row": rr, "message": f"'{course_norm}'은(는) 교육과정에 표시되지 않은 교과목 중 신설 승인이 된 과목입니다. 각 학교에서 해당 교과목을 편성하기 위해서는 교육청에 사용 승인을 받아야 합니다."})
+                    hidden_rec = None
+                else:
+                    hint = ""
+                    close = difflib.get_close_matches(course_norm, hidden_list_norm, n=2, cutoff=0.6)
+                    if close:
+                        hint = f" (유사 과목명 후보: {', '.join(close)})"
+                    issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"과목명 오류: '{course_norm}'{hint}"})
+                    hidden_rec = None
+            else:
+                hidden_rec = hidden[course_norm]
+        
+        # 숨김 시트 매칭이 있을 때만 유형/기본학점/성적처리 검증
+        if hidden_rec is not None:
+            # 유형 검증 (C열)
+            type_col = 3
+            typ_v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, type_col)
+            typ_s = safe_strip(typ_v)
+            if typ_s == "":
+                issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"유형(C{rr})이 비어 있습니다. (지침: {hidden_rec['type']})"})
+            elif typ_s != hidden_rec["type"]:
+                issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"유형 불일치: 시트='{typ_s}' / 지침='{hidden_rec['type']}'"})
+            
+            # 기본학점 검증 (E열)
+            basic_col = 5
+            basic_v, basic_formula, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, basic_col)
+            basic_n = to_number(basic_v)
+            if basic_n is None:
+                if basic_formula:
+                    issues.append({"severity": "WARNING", "sheet": all_grades_sheet, "row": rr, "message": f"기본학점(E{rr})이 수식이지만 결과값이 없습니다(엑셀 재계산/저장 필요). (수식: {basic_formula})"})
+                else:
+                    issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"기본학점(E{rr})이 숫자가 아닙니다: {basic_v}"})
+            else:
+                if hidden_rec["basic"] is not None and abs(basic_n - hidden_rec["basic"]) > EPS:
+                    issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"기본학점 불일치: 시트={basic_n:g} / 지침={hidden_rec['basic']:g}"})
+            
+            # 성적처리 확인 문구 (O열)
+            grading_col = 15
+            grade_v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, grading_col)
+            grade_s = safe_strip(grade_v)
+            if hidden_rec["grading"]:
+                issues.append({
+                    "severity": "CHECK",
+                    "sheet": all_grades_sheet,
+                    "row": rr,
+                    "message": f"소인수, 공동, 증배의 경우엔 성적처리를 다르게 설정할 수 있습니다.(지침: {hidden_rec['grading']})"
+                })
+        
+        # 운영학점 검증 (F열)
+        op_col = 6  # F열
+        op_v, op_formula, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, op_col)
+        op_n = to_number(op_v)
+        
+        # 학기별 편성 학점 합계 계산 (G~L열)
+        sem_cols = list(range(7, 13))  # G~L
+        sem_sum = 0.0
+        any_num = False
+        for cc in sem_cols:
+            v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, cc)
+            n = to_number(v)
+            if n is not None:
+                sem_sum += n
+                any_num = True
+        
+        if op_n is None:
+            if op_formula:
+                issues.append({"severity": "WARNING", "sheet": all_grades_sheet, "row": rr, "message": f"운영학점(F{rr})이 수식이지만 결과값이 없습니다(엑셀 재계산/저장 필요). (수식: {op_formula})"})
+            else:
+                issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"운영학점(F{rr})이 숫자가 아닙니다: {op_v}"})
+        else:
+            # 운영학점 범위 검증
+            if hidden_rec is not None and (hidden_rec["min"] is not None) and (hidden_rec["max"] is not None):
+                if not (hidden_rec["min"] - EPS <= op_n <= hidden_rec["max"] + EPS):
+                    issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"운영학점 범위 위반: 시트={op_n:g} / 허용범위={hidden_rec['min']:g}~{hidden_rec['max']:g}"})
+            
+            # 운영학점과 학기별 합계 비교
+            if abs(sem_sum) <= EPS:
+                # 학기별 합계가 0인 경우, 위쪽 행에서 숫자 찾기
+                nearest_sum = 0.0
+                found_any = False
+                nearest_row = None
+                
+                for search_row in range(rr - 1, first_row - 1, -1):
+                    row_has_number = False
+                    for cc in sem_cols:
+                        v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, search_row, cc)
+                        n = to_number(v)
+                        if n is not None and abs(n) > EPS:
+                            row_has_number = True
+                            break
+                    
+                    if row_has_number:
+                        nearest_row = search_row
+                        break
+                
+                if nearest_row is not None:
+                    for cc in sem_cols:
+                        v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, nearest_row, cc)
+                        n = to_number(v)
+                        if n is not None:
+                            nearest_sum += n
+                            found_any = True
+                
+                if found_any:
+                    if abs(op_n - nearest_sum) > EPS:
+                        if abs(nearest_sum - op_n * 2) <= EPS:
+                            issues.append({"severity": "CHECK", "sheet": all_grades_sheet, "row": rr, "message": f"학기 편성 학점의 합({nearest_sum:g})과 운영학점({op_n:g})이 다릅니다.(학기제라면 오류가 아닐 수 있습니다.)"})
+                        else:
+                            issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"학기 편성 학점의 합({nearest_sum:g})과 운영학점({op_n:g})이 다릅니다."})
+                else:
+                    issues.append({"severity": "CHECK", "sheet": all_grades_sheet, "row": rr, "message": f"학기 편성 학점의 합이 0입니다. 선택군 과목 편성 학점을 확인해주세요."})
+            else:
+                if abs(op_n - sem_sum) > EPS:
+                    if abs(sem_sum - op_n * 2) <= EPS:
+                        issues.append({"severity": "CHECK", "sheet": all_grades_sheet, "row": rr, "message": f"학기 편성 학점의 합({sem_sum:g})과 운영학점({op_n:g})이 다릅니다.(학기제라면 오류가 아닐 수 있습니다)"})
+                    else:
+                        issues.append({"severity": "ERROR", "sheet": all_grades_sheet, "row": rr, "message": f"학기 편성 학점의 합({sem_sum:g})과 운영학점({op_n:g})이 다릅니다."})
+        
+        # 합계 열 검증 (M열 또는 N열)
+        total_cols = [13, 14]  # M, N열
+        for total_col in total_cols:
+            total_v, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, total_col)
+            total_n = to_number(total_v)
+            
+            if total_n is not None and op_n is not None:
+                if abs(total_n - op_n) > EPS:
+                    col_name = chr(64 + total_col)  # M 또는 N
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": all_grades_sheet,
+                        "row": rr,
+                        "message": f"{col_name}열 합계 불일치: 셀값={total_n:g}, 운영학점(F열)={op_n:g}"
+                    })
+
 
 def check_school_name_consistency(wb_v, wb_f, targets, issues):
     """
@@ -1927,7 +2209,9 @@ def run_checks(xlsx_path: str):
             "row": "-", 
             "message": "엑셀 프로그램 내에서 숨김, 전문교과목록 시트를 찾을 수 없습니다. 교육청에서 제공된 양식을 활용해 주세요."
         })
-        return issues, {"targets": targets, "hidden_sheet": None, "data_source": None}
+        # 구글 스프레드시트 참조 실패 시 오류 메시지 저장
+        google_error_msg = google_error if not google_success and google_error else None
+        return issues, {"targets": targets, "hidden_sheet": None, "data_source": None, "google_error": google_error_msg}
 
     ws_hidden_v = ref_wb_v[hidden_name]
     ws_hidden_f = ref_wb_f[hidden_name]
@@ -1982,6 +2266,9 @@ def run_checks(xlsx_path: str):
     summary["hidden_sheet"] = hidden_name
     summary["hidden_course_count"] = len(hidden)
     summary["data_source"] = data_source
+    # 구글 스프레드시트 참조 실패 시 오류 메시지 저장
+    if not google_success and google_error:
+        summary["google_error"] = google_error
 
     # 전문교과목록 시트 로드 (있으면)
     vocational_courses = set()
@@ -2102,6 +2389,26 @@ def run_checks(xlsx_path: str):
         
         # '편성 학점 수' 행은 검사 대상이 아니므로, 실제 검사는 그 위까지만
         check_until_row = last_row - 1
+
+        # 증배 검사 (입학생 시트에서 제거되어야 함)
+        a_col = 1 if year in [2026, 2025] else 2  # A열 또는 B열
+        found_jeungbae = False
+        for rr in range(first_row, check_until_row + 1):
+            a_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, a_col)
+            if a_val and "증배" in str(a_val):
+                found_jeungbae = True
+                break
+
+        if found_jeungbae:
+            issues.append({
+                "severity": "WARNING",
+                "sheet": sname,
+                "row": "-",
+                "message": (
+                    "소인수, 공동, 증배 운영 과목은 전학년 시트에만 입력해주세요.\n"
+                    "일과내 운영 과목이라면 교육과정 편성표 내에 '(소인수)산업수학'과 같이 입력하여 작성하면 됩니다."
+                )
+            })
 
         # 총계/합계 행은 모든 검사 제외 (D열 내용 기준)
         exempt_rows = set()
@@ -3041,12 +3348,35 @@ def run_checks(xlsx_path: str):
     # =========================
     # (9) 2026 전학년 시트 검증
     # =========================
-    check_all_grades_sheet(wb_v, wb_f, targets, issues)
+    check_all_grades_sheet(wb_v, wb_f, targets, issues, hidden, vocational_courses, new_courses, hidden_list_norm)
 
     # =========================
     # (10) 학교명 일관성 검증
     # =========================
     check_school_name_consistency(wb_v, wb_f, targets, issues)
+
+    # =========================
+    # (11) 2025, 2026 입학생 시트 최신버전 확인
+    # =========================
+    show_version_warning = False
+    if data_source == "엑셀 파일 내부":
+        for year in [2025, 2026]:
+            if year not in targets:
+                continue
+            sname = targets[year]
+            
+            # 해당 시트의 error + warning 개수 세기
+            error_warning_count = sum(
+                1 for issue in issues 
+                if issue.get("sheet") == sname 
+                and issue.get("severity") in ["ERROR", "WARNING"]
+            )
+            
+            if error_warning_count >= 50:
+                show_version_warning = True
+                break
+    
+    summary["show_version_warning"] = show_version_warning
 
     return issues, summary
 
@@ -3360,6 +3690,22 @@ class App:
 
         self._w(tab, "[검사 개요]\n", "HEADER")
         self._w(tab, f"- 파일: {self.xlsx_path}\n", "INFO")
+
+        # 안내 메시지 (최신버전 확인)
+        if summary.get("show_version_warning", False):
+            self._w(tab, "\n[안내]\n", "HEADER")
+            self._w(tab, "참조되는 시트가 최신버전이 아닙니다. 교육청 제공 양식에 다시 작성해주세요.\n\n", "WARNING")
+        
+        # 구글 스프레드시트 참조 실패 안내
+        google_error = summary.get("google_error")
+        if google_error:
+            self._w(tab, "\n[온라인 데이터 참조 안내]\n", "HEADER")
+            # requests 라이브러리 관련 메시지는 간단하게 표시
+            if "온라인 데이터 참조 기능을 사용할 수 없습니다" in google_error:
+                self._w(tab, "온라인 데이터를 참조할 수 없어 엑셀 파일 내부의 '숨김' 및 '전문교과목록' 시트를 사용합니다.\n\n", "INFO")
+            else:
+                self._w(tab, f"구글 스프레드시트를 참조하지 못했습니다: {google_error}\n", "WARNING")
+                self._w(tab, "엑셀 파일 내부의 '숨김' 및 '전문교과목록' 시트를 사용합니다.\n\n", "INFO")
 
         targets = summary.get("targets") or {}
         self._w(tab, "- 시트 확인:\n", "INFO")

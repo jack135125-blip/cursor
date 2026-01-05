@@ -20,3 +20,4 @@ PyInstaller.__main__.run([
 
 print("\n빌드 완료! dist 폴더를 확인하세요.")
 
+

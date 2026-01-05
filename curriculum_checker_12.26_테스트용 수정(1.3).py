@@ -3589,6 +3589,7 @@ class App:
             txt.tag_configure("INFO", foreground=self.colors["muted"], font=("Malgun Gothic", 9))
             txt.tag_configure("HEADER", font=("Malgun Gothic", 11, "bold"), foreground="#5B21B6")
             txt.tag_configure("COURSE", font=("Malgun Gothic", 10, "bold"), foreground="#7C3AED")
+            txt.tag_configure("RIGHT_ALIGN", justify="right", font=("Malgun Gothic", 9), foreground=self.colors["muted"])
             self.text_widgets[name] = txt
 
     def pick_file(self):
@@ -4064,6 +4065,9 @@ class App:
             check_cnt = sum(1 for x in items if x.get("severity") == "CHECK")
             label = sheet if sheet != "-" else "기타"
             self._w("전체", f"- {label}: 오류 {err_cnt} / 경고 {warn_cnt} / 확인 {check_cnt}\n", "INFO")
+        
+        # 제작자 정보 (오른쪽 정렬)
+        self._w("전체", "\n제작: 창원여고 과정부\n", "RIGHT_ALIGN")
 
 
 def main():

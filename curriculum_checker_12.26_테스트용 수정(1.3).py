@@ -3216,32 +3216,72 @@ def run_checks(xlsx_path: str):
         if "창의적" in total_rows:
             creative_row = total_rows["창의적"]
             
-            # G~L (또는 H~M)은 각각 3이어야 함
+            # G~L (또는 H~M) 각 학기 열 검증: 값 존재 여부 및 1~5 범위 확인
+            semester_values = []
             for col_letter in sem_cols:
                 val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, creative_row, col_letter)
                 num = to_number(val)
+                col_name = chr(64 + col_letter)
                 
-                if num is not None and abs(num - 3.0) > EPS:
-                    col_name = chr(64 + col_letter)
+                # 값이 없으면 오류
+                if num is None:
                     issues.append({
                         "severity": "ERROR",
                         "sheet": sname,
                         "row": creative_row,
-                        "message": f"창의적 체험활동 학점 {col_name}열 오류: 셀값={num:g}, 기대값=3"
+                        "message": f"창의적 체험활동 학점 {col_name}열에 값이 없습니다."
                     })
+                # 값이 있지만 1~5 범위가 아니면 오류 + 경고
+                elif num < 1.0 - EPS or num > 5.0 + EPS:
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": sname,
+                        "row": creative_row,
+                        "message": f"창의적 체험활동 학점 {col_name}열 오류: 셀값={num:g}, 허용 범위=1~5"
+                    })
+                    issues.append({
+                        "severity": "WARNING",
+                        "sheet": sname,
+                        "row": creative_row,
+                        "message": f"창의적 체험활동 학점 {col_name}열은 1~5 범위 내로 설정해야 합니다."
+                    })
+                else:
+                    # 값이 있고 1~5 범위 내면 정상 (합계 계산을 위해 저장)
+                    semester_values.append(num)
             
-            # M/N열 (또는 N/O열)은 18이어야 함
-            total_col = total_cols[0]
-            actual_total, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, creative_row, total_col)
-            actual_total_num = to_number(actual_total)
+            # 합계 검증: 각 학기 열의 합과 총합 열 비교
+            # total_cols 리스트의 모든 열을 확인하여 값이 있는 열을 찾음
+            actual_total_num = None
+            total_col = None
+            total_col_name = None
             
-            if actual_total_num is not None and abs(actual_total_num - 18.0) > EPS:
-                total_col_name = chr(64 + total_col)
+            for col in total_cols:
+                val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, creative_row, col)
+                num = to_number(val)
+                if num is not None:
+                    actual_total_num = num
+                    total_col = col
+                    total_col_name = chr(64 + col)
+                    break
+            
+            # 각 학기 열의 합 계산
+            expected_total = sum(semester_values)
+            
+            if actual_total_num is None:
+                # 모든 total_cols 열에 값이 없는 경우
+                col_names = "/".join([chr(64 + col) for col in total_cols])
                 issues.append({
                     "severity": "ERROR",
                     "sheet": sname,
                     "row": creative_row,
-                    "message": f"창의적 체험활동 학점 {total_col_name}열 오류: 셀값={actual_total_num:g}, 기대값=18"
+                    "message": f"창의적 체험활동 학점 총합 열({col_names})에 값이 없습니다."
+                })
+            elif abs(actual_total_num - expected_total) > EPS:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": creative_row,
+                    "message": f"창의적 체험활동 학점 {total_col_name}열 합계 오류: 셀값={actual_total_num:g}, 기대값(각 학기 열 합)={expected_total:g}"
                 })
         
         # 편성 학점 수 검증

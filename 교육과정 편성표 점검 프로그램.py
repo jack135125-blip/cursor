@@ -719,6 +719,16 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                     # 총계 행 같은 키워드가 포함된 경우 제외
                     if any(keyword in str(course_raw) for keyword in ["편성학점", "총교과", "창의적체험", "편성학점수"]):
                         continue
+
+                    # 증배운영 과목은 입학생 시트 존재/비교 대상에서 제외
+                    a_for_row, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, 1)
+                    a_for_norm = (
+                        str(a_for_row).replace(" ", "").replace("\n", "")
+                        if a_for_row is not None
+                        else ""
+                    )
+                    if "증배운영" in a_for_norm:
+                        continue
                     
                     # B~L열, O열 값 수집
                     row_data = {"row": rr}
@@ -977,12 +987,17 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
             student_course_col = common_course_cols()["course_col"]
             
             # 전학년 시트에 있는 학생 선택 과목이 입학생 시트에 있는지 확인 (존재 여부만)
-            # 단, A열이 '증배운영 과목' 등 증배 구간이면 입학생 시트 존재 검사는 생략
+            # 단, A열이 '증배운영 과목'인 경우는 제외(위에서 수집 단계에서도 제외)
             for course_norm, row_data in student_courses.items():
                 a_val, _, _ = get_value_with_merge(
                     ws_all_v, ws_all_f, merge_all, row_data["row"], 1
                 )
-                if a_val and "증배" in str(a_val).replace(" ", ""):
+                a_norm = (
+                    str(a_val).replace(" ", "").replace("\n", "")
+                    if a_val is not None
+                    else ""
+                )
+                if "증배운영" in a_norm:
                     continue
 
                 found = False
@@ -3106,17 +3121,13 @@ class App:
                 continue
             txt.delete("1.0", "end")
 
-        if not issues:
-            self._w("전체", "문제 없음.\n", "INFO")
-            return
-
         # summary가 딕셔너리가 아닌 경우 처리
         if not isinstance(summary, dict):
             summary = {}
 
         # 그룹핑
         groups = {}
-        for it in issues:
+        for it in issues or []:
             # it이 딕셔너리가 아닌 경우 처리
             if not isinstance(it, dict):
                 continue
@@ -3172,9 +3183,15 @@ class App:
                 for msg in notices:
                     self._w(tab_name, msg + "\n\n", "INFO")
 
+        if not issues:
+            self._w("전체", "문제 없음.\n", "INFO")
+
+        sheets_with_problems = set()
+
         # 각 시트 탭에 출력
         for sheet, items in groups.items():
             tab = sheet if sheet in self.text_widgets else "기타"
+            sheets_with_problems.add(tab)
             
             # 해당 시트의 오류 개수 확인
             error_count = sum(1 for it in items if it.get("severity") == "ERROR")
@@ -3361,22 +3378,25 @@ class App:
             self._w(tab, "\n" + "=" * 80 + "\n", "INFO")
             self._w(tab, f"[전체 요약] 오류 {err_cnt}건, 경고 {warn_cnt}건, 확인 {check_cnt}건\n", "HEADER")
 
-        # 오류가 없는 시트에 메시지 출력
+        # 이슈가 없는 시트 탭에도 안내 문구 출력
         for tab_name in self.text_widgets.keys():
             if tab_name == "전체":
                 continue
-            # 해당 시트에 이슈가 없으면 메시지 출력
-            if tab_name not in groups:
-                self._w(tab_name, "발견된 오류가 없습니다.\n", "HEADER")
+            if tab_name not in sheets_with_problems:
+                self._w(tab_name, "[문제 목록]\n", "HEADER")
+                self._w(tab_name, "발견된 오류가 없습니다.\n", "INFO")
         
         # 전체 탭에도 전체 지침 간단 요약(원하면 제거 가능)
         self._w("전체", "[전체 문제 요약(시트별)]\n", "HEADER")
-        for sheet, items in sorted(groups.items(), key=lambda kv: kv[0]):
-            err_cnt = sum(1 for x in items if x.get("severity") == "ERROR")
-            warn_cnt = sum(1 for x in items if x.get("severity") == "WARNING")
-            check_cnt = sum(1 for x in items if x.get("severity") == "CHECK")
-            label = sheet if sheet != "-" else "기타"
-            self._w("전체", f"- {label}: 오류 {err_cnt} / 경고 {warn_cnt} / 확인 {check_cnt}\n", "INFO")
+        if not groups:
+            self._w("전체", "- 모든 시트: 오류 0 / 경고 0 / 확인 0\n", "INFO")
+        else:
+            for sheet, items in sorted(groups.items(), key=lambda kv: kv[0]):
+                err_cnt = sum(1 for x in items if x.get("severity") == "ERROR")
+                warn_cnt = sum(1 for x in items if x.get("severity") == "WARNING")
+                check_cnt = sum(1 for x in items if x.get("severity") == "CHECK")
+                label = sheet if sheet != "-" else "기타"
+                self._w("전체", f"- {label}: 오류 {err_cnt} / 경고 {warn_cnt} / 확인 {check_cnt}\n", "INFO")
 
 
 def main():

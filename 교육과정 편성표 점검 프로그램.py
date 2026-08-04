@@ -1654,17 +1654,29 @@ def run_checks(xlsx_path: str):
     summary["new_course_sheet"] = new_course_sheet_name
     summary["new_course_count"] = len(new_courses)
 
-    # 시트가 없다면 여기서 종료
-    if any(v is None for v in targets.values()):
+    # 대상 시트가 모두 없으면 여기서 종료.
+    # 일부만 없어도 존재하는 시트·전학년 검사는 계속 진행한다.
+    if all(v is None for v in targets.values()):
         return issues, summary
 
     # =========================
     # (2) 각 시트 검사
     # =========================
     for year, sname in targets.items():
-        ws_v = wb_v[sname]
-        ws_f = wb_f[sname]
-        merge_lookup = build_merged_lookup(ws_f)
+        if not sname:
+            continue
+        try:
+            ws_v = wb_v[sname]
+            ws_f = wb_f[sname]
+            merge_lookup = build_merged_lookup(ws_f)
+        except Exception as e:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname or "-",
+                "row": "-",
+                "message": f"{year} 입학생 시트를 읽는 중 오류: {e}"
+            })
+            continue
 
         first_row = 5
         subject_group_col = 2  # B: 교과(군)
@@ -1682,15 +1694,18 @@ def run_checks(xlsx_path: str):
         total_cols_name = "M/N"
         compare_col = 1  # A열과 M,N열 병합 비교
 
-        # last row 찾기: '편성 학점 수' 또는 '편성학점수'가 포함된 행
+        # last row 찾기: '편성 학점 수' 또는 '편성학점수' (D열 우선, A열 보조)
         last_row = None
         for rr in range(first_row, ws_f.max_row + 1):
-            v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, course_col)
-            if v is not None:
-                v_str = str(v).strip().replace(" ", "")
-                if "편성학점수" in v_str or "편성학점합계" in v_str:
-                    last_row = rr
-                    break
+            for col in (course_col, compare_col):
+                v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col)
+                if v is not None:
+                    v_str = str(v).strip().replace(" ", "")
+                    if "편성학점수" in v_str or "편성학점합계" in v_str:
+                        last_row = rr
+                        break
+            if last_row is not None:
+                break
         
         if last_row is None:
             # '편성 학점 수'를 찾지 못한 경우
@@ -2669,12 +2684,28 @@ def run_checks(xlsx_path: str):
     # =========================
     # (9) 전학년 시트 검증
     # =========================
-    check_all_grades_sheet(wb_v, wb_f, targets, issues)
+    try:
+        check_all_grades_sheet(wb_v, wb_f, targets, issues)
+    except Exception as e:
+        issues.append({
+            "severity": "ERROR",
+            "sheet": summary.get("all_grades_sheet") or ALL_GRADES_LABEL,
+            "row": "-",
+            "message": f"전학년 시트 검사 중 예외가 발생했습니다: {e}"
+        })
 
     # =========================
     # (10) 학교명 일관성 검증
     # =========================
-    check_school_name_consistency(wb_v, wb_f, targets, issues)
+    try:
+        check_school_name_consistency(wb_v, wb_f, targets, issues)
+    except Exception as e:
+        issues.append({
+            "severity": "ERROR",
+            "sheet": "-",
+            "row": "-",
+            "message": f"학교명 일관성 검사 중 예외가 발생했습니다: {e}"
+        })
 
     return issues, summary
 

@@ -1992,14 +1992,40 @@ def run_checks(xlsx_path: str):
                     if not (hidden_rec["min"] - EPS <= op_n <= hidden_rec["max"] + EPS):
                         issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"운영학점 범위 위반: 시트={op_n:g} / 허용범위={hidden_rec['min']:g}~{hidden_rec['max']:g}"})
 
-                # 현재 행 학기 합이 0이면 A열 병합 최상단 행을 검사 대상으로 사용
+                # 현재 행 학기 합이 0일 때 참조 행 결정:
+                # 1) A열이 '선택군' 병합이면 → 선택군 첫 행의 학기 학점과 비교
+                # 2) 아니면 과목명(D열) 병합(↔ 교차이수) 첫 행 참조
+                # ※ A열의 '학교지정/학생선택' 등 섹션 병합은 여러 과목이 묶이므로 사용하지 않음
                 check_row = rr
                 if abs(sem_sum) <= EPS:
-                    merge_key = (rr, compare_col)
-                    if merge_key in merge_lookup:
-                        min_row, _, _, _ = merge_lookup[merge_key]
-                        if min_row in row_total and abs(row_total.get(min_row, 0.0)) > EPS:
-                            check_row = min_row
+                    a_merge_key = (rr, compare_col)
+                    used_selection_group = False
+                    if a_merge_key in merge_lookup:
+                        min_row, _, max_row, _ = merge_lookup[a_merge_key]
+                        if max_row > min_row:
+                            a_val, _, _ = get_value_with_merge(
+                                ws_v, ws_f, merge_lookup, min_row, compare_col
+                            )
+                            a_norm = (
+                                str(a_val).replace(" ", "").replace("\n", "")
+                                if a_val is not None
+                                else ""
+                            )
+                            if "선택군" in a_norm:
+                                if min_row in row_total and abs(row_total.get(min_row, 0.0)) > EPS:
+                                    check_row = min_row
+                                    used_selection_group = True
+
+                    if not used_selection_group:
+                        course_merge_key = (rr, course_col)
+                        if course_merge_key in merge_lookup:
+                            min_row, _, max_row, _ = merge_lookup[course_merge_key]
+                            if (
+                                max_row > min_row
+                                and min_row in row_total
+                                and abs(row_total.get(min_row, 0.0)) > EPS
+                            ):
+                                check_row = min_row
 
                 check_row_sum = row_total.get(check_row, 0.0)
                 if abs(check_row_sum) <= EPS:

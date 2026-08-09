@@ -21,6 +21,7 @@
 5) 전학년 시트: '2027 전학년' (공백 변형 허용)
    - 입학생 시트와 과목·운영학점 등 교차 검증(학기 편성이 비어 있어도 메타데이터 비교)
 6) 양식 용어(총계 행 표기)가 신규 표현으로 바뀌었는지 최우선 점검
+7) 선택군 학기 편성 열: 병합 구간 가운데 가로줄이 '없음'인지 확인
 
 사용 방법
 1) pip install openpyxl
@@ -401,6 +402,74 @@ def format_number(num):
         else:
             return str(int(num))  # 강제로 정수로 변환
     return str(num)
+
+
+def _border_side_is_none(side) -> bool:
+    """셀 테두리 한 변이 '없음'(None)인지."""
+    if side is None:
+        return True
+    style = getattr(side, "style", None)
+    return style is None or style == "none"
+
+
+def check_selection_group_semester_borders(ws_f, sname, issues):
+    """
+    선택군(A열 병합) 구간의 학기 편성 열(G~L)에서
+    가운데 가로줄(내부 top/bottom)이 '없음'인지 확인.
+
+    올바른 양식: 선택군 첫 행 top·마지막 행 bottom만 유지하고,
+    사이 행의 가로줄은 none.
+    """
+    sel_merges = []
+    for mr in ws_f.merged_cells.ranges:
+        if mr.min_col != 1 or mr.max_col != 1:
+            continue
+        if mr.max_row <= mr.min_row:
+            continue
+        v = ws_f.cell(mr.min_row, 1).value
+        if not v:
+            continue
+        a_norm = str(v).replace(" ", "").replace("\n", "").replace("\r", "")
+        if "선택군" not in a_norm:
+            continue
+        sel_merges.append((mr.min_row, mr.max_row, safe_strip(v).replace("\n", " ")))
+
+    for r1, r2, label in sel_merges:
+        for col in range(7, 13):  # G~L
+            has_num = False
+            for r in range(r1, r2 + 1):
+                if to_number(ws_f.cell(r, col).value) is not None:
+                    has_num = True
+                    break
+            if not has_num:
+                continue
+
+            # 내부 가로줄: r1의 bottom, r1+1..r2의 top, r1..r2-1의 bottom 중
+            # 선택군 '가운데'에 해당하는 변은 모두 none 이어야 함
+            bad_rows = []
+            for r in range(r1, r2 + 1):
+                cell = ws_f.cell(r, col)
+                border = cell.border
+                if r < r2 and not _border_side_is_none(border.bottom):
+                    bad_rows.append(r)
+                if r > r1 and not _border_side_is_none(border.top):
+                    if r not in bad_rows:
+                        bad_rows.append(r)
+
+            if not bad_rows:
+                continue
+
+            col_name = get_column_name(col)
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": r1,
+                "message": (
+                    f"'{label}'({r1}~{r2}행) {col_name} 열의 선택군 가운데 가로줄이 "
+                    f"'없음'으로 설정되어 있지 않습니다. "
+                    f"선택군 병합 구간의 학기 편성 칸은 가운데 가로줄을 제거해 주세요."
+                ),
+            })
 
 
 def collect_course_row_data(ws_v, ws_f, merge_lookup, row):
@@ -1761,7 +1830,30 @@ def run_checks(xlsx_path: str):
     try:
         wb_v = load_workbook(xlsx_path, data_only=True)
         wb_f = load_workbook(xlsx_path, data_only=False)
+    except PermissionError:
+        return ([{
+            "severity": "WARNING",
+            "sheet": "-",
+            "row": "-",
+            "message": (
+                "엑셀 파일을 열 수 없습니다.\n"
+                "파일이 엑셀에서 열려 있으면 잠겨서 검사할 수 없습니다.\n"
+                "엑셀 파일이 닫혀 있는지 확인한 뒤 다시 검사를 실행해 주세요."
+            ),
+        }], {})
     except Exception as e:
+        errno = getattr(e, "errno", None)
+        if errno == 13 or "Permission denied" in str(e) or "PermissionError" in type(e).__name__:
+            return ([{
+                "severity": "WARNING",
+                "sheet": "-",
+                "row": "-",
+                "message": (
+                    "엑셀 파일을 열 수 없습니다.\n"
+                    "파일이 엑셀에서 열려 있으면 잠겨서 검사할 수 없습니다.\n"
+                    "엑셀 파일이 닫혀 있는지 확인한 뒤 다시 검사를 실행해 주세요."
+                ),
+            }], {})
         return ([{"severity": "ERROR", "sheet": "-", "row": "-", "message": f"엑셀 파일을 열 수 없습니다: {e}"}], {})
 
     sheetnames = wb_v.sheetnames
@@ -2336,11 +2428,19 @@ def run_checks(xlsx_path: str):
                             filled = a if a is not None else b
                             filled_name = name1 if a is not None else name2
                             if abs(filled - op_n) > EPS:
+                                # 오류는 검사 중인 과목 행(rr)에 표시
+                                # (선택군이라 학기 값은 첫 행을 참조해도, 운영학점이 틀린 쪽은 해당 과목 행)
+                                ref_note = ""
+                                if check_row != rr:
+                                    ref_note = f" (선택군 {check_row}행 학기 편성 기준)"
                                 issues.append({
                                     "severity": "ERROR",
                                     "sheet": sname,
-                                    "row": check_row,
-                                    "message": f"학기 편성 값({filled_name}={format_number(filled)})이 운영학점({format_number(op_n)})과 일치하지 않습니다."
+                                    "row": rr,
+                                    "message": (
+                                        f"학기 편성 값({filled_name}={format_number(filled)})이 "
+                                        f"운영학점({format_number(op_n)})과 일치하지 않습니다.{ref_note}"
+                                    ),
                                 })
                             continue
 
@@ -2349,18 +2449,28 @@ def run_checks(xlsx_path: str):
                             issues.append({
                                 "severity": "ERROR",
                                 "sheet": sname,
-                                "row": check_row,
-                                "message": f"학기 편성 값이 서로 다릅니다: {name1}={format_number(a)}, {name2}={format_number(b)} (둘 다 입력된 경우 같은 값이어야 합니다.)"
+                                "row": rr,
+                                "message": (
+                                    f"학기 편성 값이 서로 다릅니다: {name1}={format_number(a)}, "
+                                    f"{name2}={format_number(b)} (둘 다 입력된 경우 같은 값이어야 합니다.)"
+                                ),
                             })
                             continue
 
                         # n/n 인데 운영학점과 불일치 (예: 운영 4에 2/2)
                         if abs(a - op_n) > EPS:
+                            ref_note = ""
+                            if check_row != rr:
+                                ref_note = f" (선택군 {check_row}행 학기 편성 기준)"
                             issues.append({
                                 "severity": "ERROR",
                                 "sheet": sname,
-                                "row": check_row,
-                                "message": f"학기 편성 값({format_number(a)}/{format_number(b)})이 운영학점({format_number(op_n)})과 일치하지 않습니다. ({name1}/{name2})"
+                                "row": rr,
+                                "message": (
+                                    f"학기 편성 값({format_number(a)}/{format_number(b)})이 "
+                                    f"운영학점({format_number(op_n)})과 일치하지 않습니다. "
+                                    f"({name1}/{name2}){ref_note}"
+                                ),
                             })
 
         # (6) 합계 열 병합 구간 합계 체크 (색깔 행은 기대값에서도 제외)
@@ -2987,6 +3097,17 @@ def run_checks(xlsx_path: str):
                         "message": f"편성 학점 수 {total_col_name}열 합계 오류: 셀값={actual_final_num:g}, 기대값(총교과+창의적)={expected_final_total:g}"
                     })
 
+        # 선택군 학기 편성 열 가운데 가로줄('없음') 검사
+        try:
+            check_selection_group_semester_borders(ws_f, sname, issues)
+        except Exception as e:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": "-",
+                "message": f"선택군 가로줄(테두리) 검사 중 예외가 발생했습니다: {e}",
+            })
+
     # =========================
     # (9) 전학년 시트 검증
     # =========================
@@ -2999,6 +3120,19 @@ def run_checks(xlsx_path: str):
             "row": "-",
             "message": f"전학년 시트 검사 중 예외가 발생했습니다: {e}"
         })
+
+    # 전학년 시트 선택군 가로줄 검사
+    all_grades_sheet = summary.get("all_grades_sheet")
+    if all_grades_sheet and all_grades_sheet in wb_f.sheetnames:
+        try:
+            check_selection_group_semester_borders(wb_f[all_grades_sheet], all_grades_sheet, issues)
+        except Exception as e:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": all_grades_sheet,
+                "row": "-",
+                "message": f"선택군 가로줄(테두리) 검사 중 예외가 발생했습니다: {e}",
+            })
 
     # =========================
     # (10) 학교명 일관성 검증
@@ -3058,6 +3192,70 @@ class App:
 
         self._build_ui()
         self.xlsx_path = None
+
+    def _show_large_warning(self, title: str, message: str):
+        """글자 크기를 키운 경고 대화상자."""
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.transient(self.root)
+        dlg.grab_set()
+        dlg.resizable(False, False)
+        dlg.configure(bg="#FFFBEB")
+
+        frame = tk.Frame(dlg, bg="#FFFBEB", padx=28, pady=24)
+        frame.pack(fill="both", expand=True)
+
+        tk.Label(
+            frame,
+            text="⚠  " + title,
+            font=("Malgun Gothic", 16, "bold"),
+            fg="#B45309",
+            bg="#FFFBEB",
+            anchor="w",
+        ).pack(fill="x", pady=(0, 14))
+
+        tk.Label(
+            frame,
+            text=message,
+            font=("Malgun Gothic", 13),
+            fg="#1F2937",
+            bg="#FFFBEB",
+            justify="left",
+            wraplength=440,
+            anchor="w",
+        ).pack(fill="x", pady=(0, 20))
+
+        btn = tk.Button(
+            frame,
+            text="확인",
+            font=("Malgun Gothic", 12, "bold"),
+            bg="#F59E0B",
+            fg="white",
+            activebackground="#D97706",
+            activeforeground="white",
+            relief="flat",
+            padx=24,
+            pady=6,
+            cursor="hand2",
+            command=dlg.destroy,
+        )
+        btn.pack(anchor="e")
+        btn.focus_set()
+
+        dlg.bind("<Return>", lambda _e: dlg.destroy())
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+
+        dlg.update_idletasks()
+        w, h = dlg.winfo_reqwidth(), dlg.winfo_reqheight()
+        sw, sh = dlg.winfo_screenwidth(), dlg.winfo_screenheight()
+        x = self.root.winfo_rootx() + max(0, (self.root.winfo_width() - w) // 2)
+        y = self.root.winfo_rooty() + max(0, (self.root.winfo_height() - h) // 2)
+        # 화면 밖으로 나가지 않도록 보정
+        x = min(max(0, x), max(0, sw - w))
+        y = min(max(0, y), max(0, sh - h))
+        dlg.geometry(f"+{x}+{y}")
+
+        self.root.wait_window(dlg)
 
     def _build_ui(self):
         header = ttk.Frame(self.root, padding=(18, 18, 18, 10))
@@ -3285,6 +3483,20 @@ class App:
             return
         if not isinstance(summary, dict):
             messagebox.showerror("오류", f"검사 결과 타입 오류: summary가 dict가 아닙니다. (타입: {type(summary)})")
+            return
+
+        # 파일이 열려 있어 열 수 없는 경우: 경고 팝업
+        if any(
+            "엑셀 파일이 닫혀 있는지 확인" in str(i.get("message", ""))
+            for i in issues
+        ):
+            self._show_large_warning(
+                "파일 열기 실패",
+                "엑셀 파일을 열 수 없습니다.\n\n"
+                "파일이 엑셀에서 열려 있으면 잠겨서 검사할 수 없습니다.\n"
+                "엑셀 파일이 닫혀 있는지 확인한 뒤 다시 검사를 실행해 주세요.",
+            )
+            self.status_var.set("파일 열기 실패 — 엑셀을 닫고 다시 실행해 주세요.")
             return
 
         try:

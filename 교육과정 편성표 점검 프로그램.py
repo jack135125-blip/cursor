@@ -20,6 +20,7 @@
    - 단, 내부 일관성(운영학점 vs 학기 쌍, M/N 합계 계산)은 계속 점검(색깔 행은 전부 제외)
 5) 전학년 시트: '2027 전학년' (공백 변형 허용)
    - 입학생 시트와 과목·운영학점 등 교차 검증(학기 편성이 비어 있어도 메타데이터 비교)
+6) 양식 용어(총계 행 표기)가 신규 표현으로 바뀌었는지 최우선 점검
 
 사용 방법
 1) pip install openpyxl
@@ -1529,6 +1530,106 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                     })
 
 
+# 구 양식 → 신 양식 총계 행 표기 (공백 무시 비교용 old_norm)
+OUTDATED_FORM_LABELS = (
+    {
+        "old": "학교 지정 과목 교과 이수 학점 소계",
+        "old_norm": "학교지정과목교과이수학점소계",
+        "new": "학교 지정 과목 교과 편성 학점",
+    },
+    {
+        "old": "학생 선택 과목 교과 이수 학점 소계",
+        "old_norm": "학생선택과목교과이수학점소계",
+        "new": "학생 선택 과목 교과 편성 학점",
+    },
+    {
+        "old": "총 교과 이수 학점 소계",
+        "old_norm": "총교과이수학점소계",
+        "new": "총 교과 편성 학점",
+    },
+    {
+        "old": "창의적 체험활동",
+        "old_norm": "창의적체험활동",
+        "new": "창의적 체험활동 학점",
+        # 신 표기(…학점)는 구 표기를 포함하므로 완전 일치만 구 양식으로 본다
+        "exact": True,
+    },
+    {
+        "old": "이수 학점 총계",
+        "old_norm": "이수학점총계",
+        "new": "편성 학점 수",
+    },
+)
+
+
+def normalize_form_label(text) -> str:
+    """총계 행 표기 비교용: 공백·줄바꿈 제거."""
+    if text is None:
+        return ""
+    return str(text).replace(" ", "").replace("\n", "").replace("\r", "").strip()
+
+
+def check_outdated_form_labels(wb_v, wb_f, targets, issues):
+    """
+    점검 최우선: 총계 행 표기가 구 양식 그대로인지 확인.
+    입학생 시트 + 전학년 시트의 A~D열을 검사한다.
+    """
+    sheetnames = wb_v.sheetnames
+    sheets_to_check = []
+    for year in TARGET_YEARS:
+        sname = targets.get(year)
+        if sname:
+            sheets_to_check.append(sname)
+    all_grades_sheet = find_all_grades_sheet(sheetnames)
+    if all_grades_sheet and all_grades_sheet not in sheets_to_check:
+        sheets_to_check.append(all_grades_sheet)
+
+    if not sheets_to_check:
+        return
+
+    for sname in sheets_to_check:
+        try:
+            ws_v = wb_v[sname]
+            ws_f = wb_f[sname]
+            merge_lookup = build_merged_lookup(ws_f)
+        except Exception:
+            continue
+
+        seen = set()  # (row, old_norm) 중복 방지
+        max_row = ws_f.max_row or 0
+        for rr in range(1, max_row + 1):
+            for col in (1, 2, 3, 4):  # A~D
+                val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col)
+                if val is None or str(val).strip() == "":
+                    continue
+                norm = normalize_form_label(val)
+                if not norm:
+                    continue
+
+                for item in OUTDATED_FORM_LABELS:
+                    old_norm = item["old_norm"]
+                    if item.get("exact"):
+                        matched = norm == old_norm
+                    else:
+                        matched = old_norm in norm
+                    if not matched:
+                        continue
+                    key = (rr, old_norm)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": sname,
+                        "row": rr,
+                        "message": (
+                            f"구 양식 표기가 그대로 있습니다. 신규 양식 표현으로 수정해 주세요.\n"
+                            f"  • 현재: '{item['old']}'\n"
+                            f"  • 변경: '{item['new']}'"
+                        ),
+                    })
+
+
 def check_school_name_consistency(wb_v, wb_f, targets, issues):
     """
     모든 시트의 2행에서 학교명이 올바르게 입력되었는지 확인
@@ -1675,6 +1776,19 @@ def run_checks(xlsx_path: str):
 
     all_grades_sheet = find_all_grades_sheet(sheetnames)
     summary["all_grades_sheet"] = all_grades_sheet
+
+    # =========================
+    # (1-1) 양식 용어(총계 행) 신규 표기 여부 — 최우선 점검
+    # =========================
+    try:
+        check_outdated_form_labels(wb_v, wb_f, targets, issues)
+    except Exception as e:
+        issues.append({
+            "severity": "ERROR",
+            "sheet": "-",
+            "row": "-",
+            "message": f"양식 용어(총계 행 표기) 검사 중 예외가 발생했습니다: {e}",
+        })
 
     # ========================================
     # 숨김 시트 및 전문교과목록 시트 로드
@@ -1883,7 +1997,7 @@ def run_checks(xlsx_path: str):
                     "시트의 마지막 행에서 '편성 학점 수'를 찾지 못했습니다.\n"
                     "표의 총계 부분이 양식과 같이 입력되어 있는지 확인하고 다시 실행해 주세요.\n\n"
                     "[필요한 총계 행 구성(작년 양식에서 변경되었습니다.)]\n"
-                    "• 학생 지정 과목 교과 편성 학점\n"
+                    "• 학교 지정 과목 교과 편성 학점\n"
                     "• 학생 선택 과목 교과 편성 학점\n"
                     "• 총 교과 편성 학점\n"
                     "• 창의적 체험활동 학점\n"

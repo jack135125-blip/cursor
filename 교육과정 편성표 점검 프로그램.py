@@ -337,13 +337,20 @@ def find_marker_row(ws_values, ws_formula, merged_lookup, marker_text, search_co
     """
     특정 텍스트를 포함하는 행 찾기 (A열 기본)
     marker_text: 찾을 텍스트 (예: '학교지정과목교과편성', '학생선택과목교과편성')
+    구 양식 표기(이수학점소계)도 함께 매칭한다.
     """
+    marker_normalized = marker_text.replace(" ", "")
+    aliases = {
+        "학교지정과목교과편성": ["학교지정과목교과이수학점소계"],
+        "학생선택과목교과편성": ["학생선택과목교과이수학점소계"],
+    }
+    candidates = [marker_normalized] + aliases.get(marker_normalized, [])
+
     for r in range(1, ws_values.max_row + 1):
         v, _, _ = get_value_with_merge(ws_values, ws_formula, merged_lookup, r, search_col)
         if v is not None:
             v_str = str(v).strip().replace(" ", "")
-            marker_normalized = marker_text.replace(" ", "")
-            if marker_normalized in v_str:
+            if any(c in v_str for c in candidates):
                 return r
     return None
 
@@ -419,6 +426,7 @@ def check_selection_group_semester_borders(ws_f, sname, issues):
 
     올바른 양식: 선택군 첫 행 top·마지막 행 bottom만 유지하고,
     사이 행의 가로줄은 none.
+    오류는 시트당 1건으로 묶어 row='-'(기타)에 요약 표시한다.
     """
     sel_merges = []
     for mr in ws_f.merged_cells.ranges:
@@ -434,6 +442,7 @@ def check_selection_group_semester_borders(ws_f, sname, issues):
             continue
         sel_merges.append((mr.min_row, mr.max_row, safe_strip(v).replace("\n", " ")))
 
+    bad_items = []  # ["선택군C(54~56행) 2학년 1학기", ...]
     for r1, r2, label in sel_merges:
         for col in range(7, 13):  # G~L
             has_num = False
@@ -444,32 +453,43 @@ def check_selection_group_semester_borders(ws_f, sname, issues):
             if not has_num:
                 continue
 
-            # 내부 가로줄: r1의 bottom, r1+1..r2의 top, r1..r2-1의 bottom 중
-            # 선택군 '가운데'에 해당하는 변은 모두 none 이어야 함
-            bad_rows = []
+            # 내부 가로줄: 선택군 '가운데'에 해당하는 변은 모두 none 이어야 함
+            has_mid_border = False
             for r in range(r1, r2 + 1):
                 cell = ws_f.cell(r, col)
                 border = cell.border
                 if r < r2 and not _border_side_is_none(border.bottom):
-                    bad_rows.append(r)
+                    has_mid_border = True
+                    break
                 if r > r1 and not _border_side_is_none(border.top):
-                    if r not in bad_rows:
-                        bad_rows.append(r)
+                    has_mid_border = True
+                    break
 
-            if not bad_rows:
+            if not has_mid_border:
                 continue
 
             col_name = get_column_name(col)
-            issues.append({
-                "severity": "ERROR",
-                "sheet": sname,
-                "row": r1,
-                "message": (
-                    f"'{label}'({r1}~{r2}행) {col_name} 열의 선택군 가운데 가로줄이 "
-                    f"'없음'으로 설정되어 있지 않습니다. "
-                    f"선택군 병합 구간의 학기 편성 칸은 가운데 가로줄을 제거해 주세요."
-                ),
-            })
+            bad_items.append((r1, f"'{label}'({r1}~{r2}행) {col_name}"))
+
+    if not bad_items:
+        return
+
+    bad_items.sort(key=lambda x: x[0])
+
+    lines = [
+        "선택군 학기 편성 칸의 가운데 가로줄이 '없음'으로 설정되지 않은 곳이 있습니다.",
+        "선택군 병합 구간의 학기 편성 칸은 가운데 가로줄을 제거해 주세요.",
+        "",
+        "[해당 구간]",
+    ]
+    for _, item in bad_items:
+        lines.append(f"  • {item}")
+    issues.append({
+        "severity": "ERROR",
+        "sheet": sname,
+        "row": "-",
+        "message": "\n".join(lines),
+    })
 
 
 def collect_course_row_data(ws_v, ws_f, merge_lookup, row):
@@ -1276,7 +1296,8 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 course_str = str(course_v).strip().replace(" ", "")
                 # 총계 관련 키워드가 있으면 제외
                 if any(keyword in course_str for keyword in [
-                    "편성학점", "총교과", "창의적체험활동", "편성학점수"
+                    "편성학점", "총교과", "창의적체험활동", "편성학점수",
+                    "이수학점소계", "이수학점총계",
                 ]):
                     exempt_rows.add(rr)
         
@@ -1302,26 +1323,38 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                 if any(word in a_str for word in ["확인", "제대로", "다시", "주의", "주세요", "입력", "양식"]):
                     continue
                 
-                if ("학교지정" in a_str or "학교선택" in a_str) and "편성학점" in a_str and "과목" in a_str and "교과" in a_str:
+                if ("학교지정" in a_str or "학교선택" in a_str) and ("편성학점" in a_str or "이수학점소계" in a_str) and "과목" in a_str and "교과" in a_str:
                     total_rows["학교지정"] = rr
-                elif "학생선택" in a_str and "편성학점" in a_str and "과목" in a_str and "교과" in a_str:
+                elif "학생선택" in a_str and ("편성학점" in a_str or "이수학점소계" in a_str) and "과목" in a_str and "교과" in a_str:
                     total_rows["학생선택"] = rr
-                elif "총교과편성학점" in a_str or ("총교과" in a_str and "편성학점" in a_str and "과목" not in a_str):
+                elif (
+                    "총교과편성학점" in a_str
+                    or "총교과이수학점소계" in a_str
+                    or ("총교과" in a_str and ("편성학점" in a_str or "이수학점소계" in a_str) and "과목" not in a_str)
+                ):
                     total_rows["총교과"] = rr
-                elif "창의적체험활동" in a_str and "학점" in a_str and "과목" not in a_str:
+                elif "창의적체험활동" in a_str and "과목" not in a_str:
                     total_rows["창의적"] = rr
-                elif "편성학점수" in a_str and "과목" not in a_str and "교과" not in a_str:
+                elif ("편성학점수" in a_str or "이수학점총계" in a_str) and "과목" not in a_str and "교과" not in a_str:
                     total_rows["편성학점수"] = rr
         
         # 필수 셀 존재 여부 확인
-        for key, cell_name in required_cells.items():
-            if key not in total_rows:
-                issues.append({
-                    "severity": "ERROR",
-                    "sheet": all_grades_sheet,
-                    "row": "-",
-                    "message": f"총계 부분의 {cell_name} 셀이 존재하지 않습니다. 교육청의 양식을 확인하여 수정하고 다시 검사를 진행해주세요."
-                })
+        # 구 양식 표기 오류가 이미 있으면 동일 원인으로 중복 안내하지 않음
+        already_form_label_error = any(
+            i.get("sheet") == all_grades_sheet
+            and i.get("row") == "-"
+            and "구 양식 표기" in str(i.get("message", ""))
+            for i in issues
+        )
+        if not already_form_label_error:
+            for key, cell_name in required_cells.items():
+                if key not in total_rows:
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": all_grades_sheet,
+                        "row": "-",
+                        "message": f"총계 부분의 {cell_name} 셀이 존재하지 않습니다. 교육청의 양식을 확인하여 수정하고 다시 검사를 진행해주세요."
+                    })
         
         # G~L 열 (전학년 시트의 학기별 열)
         sem_cols = list(range(7, 13))  # G~L
@@ -1638,10 +1671,113 @@ def normalize_form_label(text) -> str:
     return str(text).replace(" ", "").replace("\n", "").replace("\r", "").strip()
 
 
+# 점검에 꼭 필요한 총계/마커 셀 (신·구 표기 모두 허용)
+CRITICAL_FORM_CELLS = (
+    {
+        "key": "final_total",
+        "label": "'편성 학점 수'(또는 구 표기 '이수 학점 총계')",
+        "short": "편성 학점 수 / 이수 학점 총계",
+    },
+    {
+        "key": "school_designated",
+        "label": "'학교 지정 과목 교과 편성 학점'(또는 구 표기 '학교 지정 과목 교과 이수 학점 소계')",
+        "short": "학교 지정 과목 교과 편성 학점 / 이수 학점 소계",
+    },
+)
+
+
+def _cell_matches_critical(key: str, norm: str) -> bool:
+    if not norm:
+        return False
+    if key == "final_total":
+        if "과목" in norm and "교과" in norm:
+            return False
+        return (
+            "편성학점수" in norm
+            or "편성학점합계" in norm
+            or "이수학점총계" in norm
+        )
+    if key == "school_designated":
+        return (
+            ("학교지정" in norm or "학교선택" in norm)
+            and ("편성학점" in norm or "이수학점소계" in norm)
+            and "과목" in norm
+            and "교과" in norm
+        )
+    return False
+
+
+def check_critical_form_cells(wb_v, wb_f, targets, issues, summary):
+    """
+    점검에 필수인 총계/마커 셀이 시트에 있는지 확인.
+    없으면 issues + summary['missing_critical_cells']에 기록한다.
+    """
+    sheetnames = wb_v.sheetnames
+    sheets_to_check = []
+    for year in TARGET_YEARS:
+        sname = targets.get(year)
+        if sname:
+            sheets_to_check.append(sname)
+    all_grades_sheet = find_all_grades_sheet(sheetnames)
+    if all_grades_sheet and all_grades_sheet not in sheets_to_check:
+        sheets_to_check.append(all_grades_sheet)
+
+    missing = []
+    for sname in sheets_to_check:
+        try:
+            ws_v = wb_v[sname]
+            ws_f = wb_f[sname]
+            merge_lookup = build_merged_lookup(ws_f)
+        except Exception:
+            continue
+
+        found = {item["key"]: False for item in CRITICAL_FORM_CELLS}
+        max_row = ws_f.max_row or 0
+        for rr in range(1, max_row + 1):
+            for col in (1, 2, 3, 4):
+                val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col)
+                if val is None or str(val).strip() == "":
+                    continue
+                norm = normalize_form_label(val)
+                if len(norm) > 40:
+                    continue
+                for item in CRITICAL_FORM_CELLS:
+                    if found[item["key"]]:
+                        continue
+                    if _cell_matches_critical(item["key"], norm):
+                        found[item["key"]] = True
+            if all(found.values()):
+                break
+
+        for item in CRITICAL_FORM_CELLS:
+            if found[item["key"]]:
+                continue
+            missing.append({
+                "sheet": sname,
+                "key": item["key"],
+                "label": item["label"],
+                "short": item["short"],
+            })
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": "-",
+                "message": (
+                    f"{item['label']} 셀을 찾을 수 없습니다.\n"
+                    f"해당 셀이 있어야 점검이 가능합니다.\n"
+                    f"양식을 확인하여 수정하고 다시 실행해 주세요."
+                ),
+            })
+
+    summary["missing_critical_cells"] = missing
+    return missing
+
+
 def check_outdated_form_labels(wb_v, wb_f, targets, issues):
     """
     점검 최우선: 총계 행 표기가 구 양식 그대로인지 확인.
     입학생 시트 + 전학년 시트의 A~D열을 검사한다.
+    발견 시 시트당 1건으로 묶어 row='-'(기타)에만 표시한다.
     """
     sheetnames = wb_v.sheetnames
     sheets_to_check = []
@@ -1664,7 +1800,8 @@ def check_outdated_form_labels(wb_v, wb_f, targets, issues):
         except Exception:
             continue
 
-        seen = set()  # (row, old_norm) 중복 방지
+        seen = set()  # old_norm 중복 방지
+        found = []  # [(old, new), ...]
         max_row = ws_f.max_row or 0
         for rr in range(1, max_row + 1):
             for col in (1, 2, 3, 4):  # A~D
@@ -1683,20 +1820,25 @@ def check_outdated_form_labels(wb_v, wb_f, targets, issues):
                         matched = old_norm in norm
                     if not matched:
                         continue
-                    key = (rr, old_norm)
-                    if key in seen:
+                    if old_norm in seen:
                         continue
-                    seen.add(key)
-                    issues.append({
-                        "severity": "ERROR",
-                        "sheet": sname,
-                        "row": rr,
-                        "message": (
-                            f"구 양식 표기가 그대로 있습니다. 신규 양식 표현으로 수정해 주세요.\n"
-                            f"  • 현재: '{item['old']}'\n"
-                            f"  • 변경: '{item['new']}'"
-                        ),
-                    })
+                    seen.add(old_norm)
+                    found.append((item["old"], item["new"]))
+
+        if found:
+            lines = [
+                "구 양식 표기가 그대로 있습니다. 신규 양식 표현으로 수정해 주세요.",
+                "",
+                "[변경 안내]",
+            ]
+            for old, new in found:
+                lines.append(f"  • '{old}' → '{new}'")
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": "-",
+                "message": "\n".join(lines),
+            })
 
 
 def check_school_name_consistency(wb_v, wb_f, targets, issues):
@@ -1882,6 +2024,20 @@ def run_checks(xlsx_path: str):
             "message": f"양식 용어(총계 행 표기) 검사 중 예외가 발생했습니다: {e}",
         })
 
+    # =========================
+    # (1-2) 점검 필수 셀(총계/학교지정 마커) 존재 여부
+    # =========================
+    try:
+        check_critical_form_cells(wb_v, wb_f, targets, issues, summary)
+    except Exception as e:
+        summary["missing_critical_cells"] = []
+        issues.append({
+            "severity": "ERROR",
+            "sheet": "-",
+            "row": "-",
+            "message": f"필수 양식 셀 검사 중 예외가 발생했습니다: {e}",
+        })
+
     # ========================================
     # 숨김 시트 및 전문교과목록 시트 로드
     # 우선순위: 1) 구글 스프레드시트 → 2) 엑셀 파일 내부
@@ -2050,6 +2206,18 @@ def run_checks(xlsx_path: str):
             })
             continue
 
+        # 선택군 학기 편성 열 가운데 가로줄('없음') 검사
+        # (총계 행 표기 문제로 아래 검사가 중단되어도 가로줄은 반드시 점검)
+        try:
+            check_selection_group_semester_borders(ws_f, sname, issues)
+        except Exception as e:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": "-",
+                "message": f"선택군 가로줄(테두리) 검사 중 예외가 발생했습니다: {e}",
+            })
+
         first_row = 5
         subject_group_col = 2  # B: 교과(군)
         course_col = 4  # D
@@ -2066,39 +2234,49 @@ def run_checks(xlsx_path: str):
         total_cols_name = "M/N"
         compare_col = 1  # A열과 M,N열 병합 비교
 
-        # last row 찾기: '편성 학점 수' 또는 '편성학점수' (D열 우선, A열 보조)
+        # last row 찾기: '편성 학점 수'(신) 또는 '이수 학점 총계'(구) (D열 우선, A열 보조)
         last_row = None
         for rr in range(first_row, ws_f.max_row + 1):
             for col in (course_col, compare_col):
                 v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col)
                 if v is not None:
                     v_str = str(v).strip().replace(" ", "")
-                    if "편성학점수" in v_str or "편성학점합계" in v_str:
+                    if (
+                        "편성학점수" in v_str
+                        or "편성학점합계" in v_str
+                        or "이수학점총계" in v_str
+                    ):
                         last_row = rr
                         break
             if last_row is not None:
                 break
         
         if last_row is None:
-            # '편성 학점 수'를 찾지 못한 경우
-            issues.append({
-                "severity": "ERROR", 
-                "sheet": sname, 
-                "row": "-", 
-                "message": (
-                    "시트의 마지막 행에서 '편성 학점 수'를 찾지 못했습니다.\n"
-                    "표의 총계 부분이 양식과 같이 입력되어 있는지 확인하고 다시 실행해 주세요.\n\n"
-                    "[필요한 총계 행 구성(작년 양식에서 변경되었습니다.)]\n"
-                    "• 학교 지정 과목 교과 편성 학점\n"
-                    "• 학생 선택 과목 교과 편성 학점\n"
-                    "• 총 교과 편성 학점\n"
-                    "• 창의적 체험활동 학점\n"
-                    "• 편성 학점 수"
+            # 필수 셀 점검/구 양식 안내가 이미 있으면 중복 안내하지 않음
+            already_reported = any(
+                i.get("sheet") == sname
+                and i.get("row") == "-"
+                and (
+                    "구 양식 표기" in str(i.get("message", ""))
+                    or "편성 학점 수" in str(i.get("message", ""))
+                    or "이수 학점 총계" in str(i.get("message", ""))
                 )
-            })
+                for i in issues
+            )
+            if not already_reported:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": "-",
+                    "message": (
+                        "'편성 학점 수'(또는 구 표기 '이수 학점 총계') 셀을 찾을 수 없습니다.\n"
+                        "해당 셀이 있어야 점검이 가능합니다.\n"
+                        "양식을 확인하여 수정하고 다시 실행해 주세요."
+                    ),
+                })
             continue
         
-        # '편성 학점 수' 행은 검사 대상이 아니므로, 실제 검사는 그 위까지만
+        # '편성 학점 수'(또는 구 표기 '이수 학점 총계') 행은 검사 대상이 아니므로, 실제 검사는 그 위까지만
         check_until_row = last_row - 1
 
         # 총계/합계 행은 모든 검사 제외 (D열 내용 기준)
@@ -2107,9 +2285,10 @@ def run_checks(xlsx_path: str):
             course_v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, course_col)
             if course_v:
                 course_str = str(course_v).strip().replace(" ", "")
-                # 총계 관련 키워드가 있으면 제외
+                # 총계 관련 키워드가 있으면 제외 (신·구 표기 모두)
                 if any(keyword in course_str for keyword in [
-                    "편성학점", "총교과", "창의적체험활동", "편성학점수"
+                    "편성학점", "총교과", "창의적체험활동", "편성학점수",
+                    "이수학점소계", "이수학점총계",
                 ]):
                     exempt_rows.add(rr)
 
@@ -2722,26 +2901,38 @@ def run_checks(xlsx_path: str):
                 if any(word in col_str for word in ["확인", "제대로", "다시", "주의", "주세요", "입력", "양식"]):
                     continue
                 
-                if ("학교지정" in col_str or "학교선택" in col_str) and "편성학점" in col_str and "과목" in col_str and "교과" in col_str:
+                if ("학교지정" in col_str or "학교선택" in col_str) and ("편성학점" in col_str or "이수학점소계" in col_str) and "과목" in col_str and "교과" in col_str:
                     total_rows["학교지정"] = rr
-                elif "학생선택" in col_str and "편성학점" in col_str and "과목" in col_str and "교과" in col_str:
+                elif "학생선택" in col_str and ("편성학점" in col_str or "이수학점소계" in col_str) and "과목" in col_str and "교과" in col_str:
                     total_rows["학생선택"] = rr
-                elif "총교과편성학점" in col_str or ("총교과" in col_str and "편성학점" in col_str and "과목" not in col_str):
+                elif (
+                    "총교과편성학점" in col_str
+                    or "총교과이수학점소계" in col_str
+                    or ("총교과" in col_str and ("편성학점" in col_str or "이수학점소계" in col_str) and "과목" not in col_str)
+                ):
                     total_rows["총교과"] = rr
-                elif "창의적체험활동" in col_str and "학점" in col_str and "과목" not in col_str:
+                elif "창의적체험활동" in col_str and "과목" not in col_str:
                     total_rows["창의적"] = rr
-                elif "편성학점수" in col_str and "과목" not in col_str and "교과" not in col_str:
+                elif ("편성학점수" in col_str or "이수학점총계" in col_str) and "과목" not in col_str and "교과" not in col_str:
                     total_rows["편성학점수"] = rr
         
         # 필수 셀 존재 여부 확인
-        for key, cell_name in required_cells.items():
-            if key not in total_rows:
-                issues.append({
-                    "severity": "ERROR",
-                    "sheet": sname,
-                    "row": "-",
-                    "message": f"총계 부분의 {cell_name} 셀이 존재하지 않습니다. 교육청의 양식을 확인하여 수정하고 다시 검사를 진행해주세요."
-                })
+        # 구 양식 표기 오류가 이미 있으면 동일 원인으로 중복 안내하지 않음
+        already_form_label_error = any(
+            i.get("sheet") == sname
+            and i.get("row") == "-"
+            and "구 양식 표기" in str(i.get("message", ""))
+            for i in issues
+        )
+        if not already_form_label_error:
+            for key, cell_name in required_cells.items():
+                if key not in total_rows:
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": sname,
+                        "row": "-",
+                        "message": f"총계 부분의 {cell_name} 셀이 존재하지 않습니다. 교육청의 양식을 확인하여 수정하고 다시 검사를 진행해주세요."
+                    })
         
         # 총계 행 검증
         if "학교지정" in total_rows:
@@ -3096,17 +3287,6 @@ def run_checks(xlsx_path: str):
                         "row": final_row,
                         "message": f"편성 학점 수 {total_col_name}열 합계 오류: 셀값={actual_final_num:g}, 기대값(총교과+창의적)={expected_final_total:g}"
                     })
-
-        # 선택군 학기 편성 열 가운데 가로줄('없음') 검사
-        try:
-            check_selection_group_semester_borders(ws_f, sname, issues)
-        except Exception as e:
-            issues.append({
-                "severity": "ERROR",
-                "sheet": sname,
-                "row": "-",
-                "message": f"선택군 가로줄(테두리) 검사 중 예외가 발생했습니다: {e}",
-            })
 
     # =========================
     # (9) 전학년 시트 검증
@@ -3678,14 +3858,46 @@ class App:
                 self._w(tab, "[경고] ", "ERROR")
                 self._w(tab, f"오류가 50개 이상 발견됩니다. 양식이 올바른지 확인해주세요.(교육청 양식 참고)\n\n", "WARNING")
             
+            # 필수 셀 누락은 [문제 목록] 최상단에 먼저 표시
+            def _is_critical_missing(it):
+                msg = str(it.get("message", ""))
+                return "있어야 점검이 가능합니다" in msg or (
+                    "셀을 찾을 수 없습니다" in msg
+                    and ("편성 학점 수" in msg or "이수 학점 총계" in msg or "학교 지정 과목" in msg)
+                )
+
+            critical_items = [it for it in items if _is_critical_missing(it)]
+            other_items_for_rows = [it for it in items if not _is_critical_missing(it)]
+
             # 행 번호별로 그룹핑
             row_groups = {}
             
-            for it in sorted(items, key=sort_key):
+            for it in sorted(other_items_for_rows, key=sort_key):
                 row = it.get("row", "-")
                 row_groups.setdefault(row, []).append(it)
             
             self._w(tab, "[문제 목록]\n", "HEADER")
+
+            if critical_items:
+                self._w(tab, "\n▶ 필수 셀 누락 (점검 선행 조건)\n", "COURSE")
+                self._w(tab, "─" * 80 + "\n", "INFO")
+                for it in critical_items:
+                    sev = it.get("severity", "ERROR")
+                    msg = it.get("message", "")
+                    lines = msg.split("\n")
+                    self._w(
+                        tab,
+                        f"  [{sev}] {lines[0]}\n",
+                        sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO",
+                    )
+                    for line in lines[1:]:
+                        if line.strip():
+                            self._w(
+                                tab,
+                                f"      {line}\n",
+                                sev if sev in ("ERROR", "WARNING", "CHECK") else "INFO",
+                            )
+                self._w(tab, "\n", "INFO")
             
             # 엑셀 파일에서 행 정보를 읽어오기 위한 준비
             try:

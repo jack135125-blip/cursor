@@ -22,6 +22,15 @@
    - 입학생 시트와 과목·운영학점 등 교차 검증(학기 편성이 비어 있어도 메타데이터 비교)
 6) 양식 용어(총계 행 표기)가 신규 표현으로 바뀌었는지 최우선 점검
 7) 선택군 학기 편성 열: 병합 구간 가운데 가로줄이 '없음'인지 확인
+8) 증배운영 과목:
+   - 전학년 ↔ 입학생 교차 대조는 하지 않음
+   - 유형·기본학점·운영학점 vs 학기 편성은 입학생 시트와 같이 점검
+   - 성적처리는 오류가 아니라 확인(CHECK)만
+   - 지침이 '성취도 5단계+석차등급O'이면 '성취도 5단계+석차등급X'도 허용
+9) 전학년 시트 개설 여부(M/N):
+   - 1학기(G/I/K) 편성 없이 M열이 O이거나, 2학기(H/J/L) 편성 없이 N열이 O이면 오류
+   - 편성되어 있는데 X이거나, 미편성에 X인 경우는 검사하지 않음
+10) 전학년 시트 과목명: 지침(숨김)과 다르면 경고. 기존 교차 비교·증배 점검은 그대로 진행
 
 사용 방법
 1) pip install openpyxl
@@ -261,6 +270,36 @@ def safe_strip(v):
     if v is None:
         return ""
     return str(v).strip()
+
+
+def is_jeungbae_operating_cell(a_val) -> bool:
+    """A열(구분)에 '증배운영'이 있으면 증배운영 과목 행."""
+    if a_val is None:
+        return False
+    return "증배운영" in str(a_val).replace(" ", "").replace("\n", "")
+
+
+def _norm_grading_text(text) -> str:
+    """성적처리 유형 비교용: 공백·줄바꿈 제거."""
+    if text is None:
+        return ""
+    return str(text).replace(" ", "").replace("\n", "").replace("\r", "").strip()
+
+
+def jeungbae_grading_is_allowed(sheet_grade, guide_grade) -> bool:
+    """
+    증배운영 과목 성적처리 허용 여부.
+    지침이 '성취도 5단계+석차등급O'이면 '성취도 5단계+석차등급X'도 허용.
+    """
+    s = _norm_grading_text(sheet_grade)
+    g = _norm_grading_text(guide_grade)
+    if not s:
+        return False
+    if s == g:
+        return True
+    if g == "성취도5단계+석차등급O" and s == "성취도5단계+석차등급X":
+        return True
+    return False
 
 
 def is_colored_fill(cell) -> bool:
@@ -584,6 +623,415 @@ def compare_course_field_values(
                     f"{dst_col_name}({format_number(dst_num)})이 일치하지 않습니다."
                 ),
             })
+
+
+def check_jeungbae_operating_vs_semester(ws_v, ws_f, merge_lookup, sname, rr, op_n, issues):
+    """
+    증배운영 과목: 운영학점(F)과 학기 편성(G~L) 값이 같은지 점검.
+    입학생 시트와 동일한 학기 쌍 규칙(한쪽만 입력 허용, 둘 다 있으면 서로·운영학점과 일치).
+    """
+    sem_pairs = [(7, 8), (9, 10), (11, 12)]  # 1·2·3학년 학기 쌍
+    any_filled = False
+
+    for c1, c2 in sem_pairs:
+        v1, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, c1)
+        v2, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, c2)
+        n1 = to_number(v1)
+        n2 = to_number(v2)
+        name1 = get_column_name(c1)
+        name2 = get_column_name(c2)
+
+        if n1 is None and n2 is None:
+            continue
+
+        a = None if (n1 is None or abs(n1) <= EPS) else n1
+        b = None if (n2 is None or abs(n2) <= EPS) else n2
+
+        if a is None and b is None:
+            continue
+
+        any_filled = True
+
+        if a is None or b is None:
+            filled = a if a is not None else b
+            filled_name = name1 if a is not None else name2
+            if abs(filled - op_n) > EPS:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": (
+                        f"증배운영 과목: 학기 편성 값({filled_name}={format_number(filled)})이 "
+                        f"운영학점({format_number(op_n)})과 일치하지 않습니다."
+                    ),
+                })
+            continue
+
+        if abs(a - b) > EPS:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": rr,
+                "message": (
+                    f"증배운영 과목: 학기 편성 값이 서로 다릅니다: "
+                    f"{name1}={format_number(a)}, {name2}={format_number(b)} "
+                    f"(둘 다 입력된 경우 같은 값이어야 합니다.)"
+                ),
+            })
+            continue
+
+        if abs(a - op_n) > EPS:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": rr,
+                "message": (
+                    f"증배운영 과목: 학기 편성 값({format_number(a)}/{format_number(b)})이 "
+                    f"운영학점({format_number(op_n)})과 일치하지 않습니다. ({name1}/{name2})"
+                ),
+            })
+
+    if not any_filled:
+        issues.append({
+            "severity": "CHECK",
+            "sheet": sname,
+            "row": rr,
+            "message": "증배운영 과목: 학기 편성 학점이 없습니다. 편성 학점을 확인해주세요.",
+        })
+
+
+def check_jeungbae_operating_courses_on_sheet(
+    ws_v, ws_f, merge_lookup, sname, issues,
+    hidden, hidden_list_norm, vocational_courses, new_courses,
+):
+    """
+    증배운영 과목 행을 입학생 시트와 같이 점검.
+    전학년 ↔ 입학생 교차 대조는 하지 않고,
+    유형·기본학점·운영학점 vs 학기 편성·성적처리(확인)만 본다.
+    """
+    first_row = 5
+    course_col = 4
+    type_col = 3
+    basic_col = 5
+    op_col = 6
+    grading_col = 15
+    a_col = 1
+
+    last_row = None
+    for rr in range(first_row, ws_f.max_row + 1):
+        for col in (course_col, a_col):
+            v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col)
+            if v is None:
+                continue
+            v_str = str(v).strip().replace(" ", "")
+            if (
+                "편성학점수" in v_str
+                or "편성학점합계" in v_str
+                or "이수학점총계" in v_str
+            ):
+                last_row = rr
+                break
+        if last_row is not None:
+            break
+    if last_row is None:
+        last_row = ws_f.max_row + 1
+
+    check_until_row = last_row - 1
+    total_keywords = (
+        "편성학점", "총교과", "창의적체험", "편성학점수",
+        "이수학점소계", "이수학점총계",
+    )
+
+    for rr in range(first_row, check_until_row + 1):
+        a_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, a_col)
+        if not is_jeungbae_operating_cell(a_val):
+            continue
+
+        course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, course_col)
+        if course_raw is None or str(course_raw).strip() == "":
+            continue
+        if is_error_token(course_raw):
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": rr,
+                "message": f"증배운영 과목: 과목명(D{rr})에 오류값이 있습니다: {course_raw}",
+            })
+            continue
+
+        course_str = str(course_raw).strip().replace(" ", "")
+        if any(keyword in course_str for keyword in total_keywords):
+            continue
+
+        course_norm = normalize_course_name(course_raw)
+        if course_norm == "":
+            continue
+
+        hidden_rec = hidden.get(course_norm)
+
+        if hidden_rec is not None:
+            typ_v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, type_col)
+            typ_s = safe_strip(typ_v)
+            if typ_s == "":
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": f"증배운영 과목: 유형(C{rr})이 비어 있습니다. (지침: {hidden_rec['type']})",
+                })
+            elif typ_s != hidden_rec["type"]:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": (
+                        f"증배운영 과목: 유형 불일치: 시트='{typ_s}' / 지침='{hidden_rec['type']}'"
+                    ),
+                })
+
+            basic_v, basic_formula, _ = get_value_with_merge(
+                ws_v, ws_f, merge_lookup, rr, basic_col
+            )
+            basic_n = to_number(basic_v)
+            if basic_n is None:
+                if basic_formula:
+                    issues.append({
+                        "severity": "WARNING",
+                        "sheet": sname,
+                        "row": rr,
+                        "message": (
+                            f"증배운영 과목: 기본학점(E{rr})이 수식이지만 결과값이 없습니다"
+                            f"(엑셀 재계산/저장 필요). (수식: {basic_formula})"
+                        ),
+                    })
+                else:
+                    issues.append({
+                        "severity": "ERROR",
+                        "sheet": sname,
+                        "row": rr,
+                        "message": f"증배운영 과목: 기본학점(E{rr})이 숫자가 아닙니다: {basic_v}",
+                    })
+            elif hidden_rec["basic"] is not None and abs(basic_n - hidden_rec["basic"]) > EPS:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": (
+                        f"증배운영 과목: 기본학점 불일치: 시트={basic_n:g} / "
+                        f"지침={hidden_rec['basic']:g}"
+                    ),
+                })
+
+            grade_v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, grading_col)
+            grade_s = safe_strip(grade_v)
+            guide_grade = hidden_rec.get("grading") or "(지침 없음)"
+            if grade_s == "":
+                issues.append({
+                    "severity": "CHECK",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": (
+                        f"증배운영 과목: 성적처리 유형(O{rr})이 비어 있습니다. "
+                        f"확인해주세요. (지침: {guide_grade})"
+                    ),
+                })
+            elif not jeungbae_grading_is_allowed(grade_s, hidden_rec.get("grading", "")):
+                issues.append({
+                    "severity": "CHECK",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": (
+                        f"증배운영 과목: 성적처리 유형 확인. "
+                        f"이상없으면 무시 (시트='{grade_s}' / 지침='{guide_grade}')"
+                    ),
+                })
+
+        op_v, op_formula, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, op_col)
+        op_n = to_number(op_v)
+        if op_n is None:
+            if op_formula:
+                issues.append({
+                    "severity": "WARNING",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": (
+                        f"증배운영 과목: 운영학점(F{rr})이 수식이지만 결과값이 없습니다"
+                        f"(엑셀 재계산/저장 필요). (수식: {op_formula})"
+                    ),
+                })
+            else:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": sname,
+                    "row": rr,
+                    "message": f"증배운영 과목: 운영학점(F{rr})이 숫자가 아닙니다: {op_v}",
+                })
+        else:
+            check_jeungbae_operating_vs_semester(
+                ws_v, ws_f, merge_lookup, sname, rr, op_n, issues
+            )
+
+
+def _warn_all_grades_course_name_vs_guideline(
+    issues, sname, rr, course_norm,
+    hidden, hidden_list_norm, vocational_courses, new_courses,
+):
+    """전학년 시트 과목명 1건을 지침과 대조. 불일치는 경고."""
+    if not course_norm:
+        return
+    if course_norm in hidden:
+        return
+    if course_norm in vocational_courses:
+        issues.append({
+            "severity": "CHECK",
+            "sheet": sname,
+            "row": rr,
+            "message": (
+                f"일반고에서 전문교과의 경우는 진로로 편성할 수 있습니다. "
+                f"(과목명: '{course_norm}')"
+            ),
+        })
+        return
+    if course_norm in new_courses:
+        issues.append({
+            "severity": "CHECK",
+            "sheet": sname,
+            "row": rr,
+            "message": (
+                f"'{course_norm}'은(는) 교육과정에 표시되지 않은 교과목 중 "
+                f"신설 승인이 된 과목입니다. 각 학교에서 해당 교과목을 편성하기 위해서는 "
+                f"교육청에 사용 승인을 받아야 합니다."
+            ),
+        })
+        return
+    hint = ""
+    close = difflib.get_close_matches(course_norm, hidden_list_norm, n=2, cutoff=0.6)
+    if close:
+        hint = f" (유사 과목명 후보: {', '.join(close)})"
+    issues.append({
+        "severity": "WARNING",
+        "sheet": sname,
+        "row": rr,
+        "message": f"과목명이 지침과 일치하지 않습니다: '{course_norm}'{hint}",
+    })
+
+
+def check_all_grades_course_names_against_guideline(
+    ws_v, ws_f, merge_lookup, sname, issues,
+    hidden, hidden_list_norm, vocational_courses, new_courses,
+):
+    """
+    전학년 시트 과목명이 지침(숨김)과 같은지 먼저 확인.
+    다르면 경고만 띄우고, 전학년↔입학생 교차 비교 등 기존 점검은 그대로 둔다.
+    """
+    first_row = 5
+    course_col = 4
+    a_col = 1
+    last_row = None
+    for rr in range(first_row, ws_f.max_row + 1):
+        for col in (course_col, a_col):
+            v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, col)
+            if v is None:
+                continue
+            v_str = str(v).strip().replace(" ", "")
+            if (
+                "편성학점수" in v_str
+                or "편성학점합계" in v_str
+                or "이수학점총계" in v_str
+            ):
+                last_row = rr
+                break
+        if last_row is not None:
+            break
+    if last_row is None:
+        last_row = ws_f.max_row + 1
+
+    check_until_row = last_row - 1
+    total_keywords = (
+        "편성학점", "총교과", "창의적체험", "편성학점수",
+        "이수학점소계", "이수학점총계",
+    )
+
+    for rr in range(first_row, check_until_row + 1):
+        course_raw, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, course_col)
+        if course_raw is None or str(course_raw).strip() == "":
+            continue
+        if is_error_token(course_raw):
+            continue
+
+        course_str = str(course_raw).strip().replace(" ", "")
+        if any(keyword in course_str for keyword in total_keywords):
+            continue
+
+        course_norm = normalize_course_name(course_raw)
+        if course_norm == "":
+            issues.append({
+                "severity": "WARNING",
+                "sheet": sname,
+                "row": rr,
+                "message": "과목명(D열)에서 괄호 제거 후 이름이 비었습니다. 지침과 대조할 수 없습니다.",
+            })
+            continue
+
+        parts = split_bidirectional(course_norm)
+        if len(parts) >= 2:
+            for part in parts:
+                _warn_all_grades_course_name_vs_guideline(
+                    issues, sname, rr, part,
+                    hidden, hidden_list_norm, vocational_courses, new_courses,
+                )
+        else:
+            _warn_all_grades_course_name_vs_guideline(
+                issues, sname, rr, course_norm,
+                hidden, hidden_list_norm, vocational_courses, new_courses,
+            )
+
+
+def _has_nonzero_semester_credit(ws_v, ws_f, merge_lookup, row, cols) -> bool:
+    """지정 학기 열 중 0이 아닌 숫자가 있으면 True."""
+    for col in cols:
+        v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, row, col)
+        n = to_number(v)
+        if n is not None and abs(n) > EPS:
+            return True
+    return False
+
+
+def _is_open_flag_o(val) -> bool:
+    """개설 여부 셀이 O(개설)인지."""
+    s = safe_strip(val).upper().replace(" ", "").replace("\n", "")
+    return s in ("O", "○", "Ｏ")
+
+
+def _all_grades_semester_check_row(ws_v, ws_f, merge_lookup, rr, course_col=4, a_col=1) -> int:
+    """
+    전학년 시트에서 학기 편성 값을 읽을 행.
+    현재 행에 학기 숫자가 없고 A열이 선택군 병합이면 선택군 첫 행,
+    과목명(D열) 병합이면 그 첫 행을 사용. 증배운영 병합은 행 단위.
+    """
+    sem_all = (7, 8, 9, 10, 11, 12)
+    if _has_nonzero_semester_credit(ws_v, ws_f, merge_lookup, rr, sem_all):
+        return rr
+
+    a_key = (rr, a_col)
+    if a_key in merge_lookup:
+        min_row, _, max_row, _ = merge_lookup[a_key]
+        if max_row > min_row:
+            a_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, min_row, a_col)
+            a_norm = (
+                str(a_val).replace(" ", "").replace("\n", "")
+                if a_val is not None
+                else ""
+            )
+            if "증배" not in a_norm and "선택군" in a_norm:
+                return min_row
+
+    d_key = (rr, course_col)
+    if d_key in merge_lookup:
+        min_row, _, max_row, _ = merge_lookup[d_key]
+        if max_row > min_row:
+            return min_row
+    return rr
 
 
 def check_all_grades_sheet(wb_v, wb_f, targets, issues):
@@ -1630,6 +2078,53 @@ def check_all_grades_sheet(wb_v, wb_f, targets, issues):
                         "message": f"편성 학점 수 {col_name}열 합계 오류: 셀값={actual_num:g}, 기대값(총교과+창의적)={expected_sum:g}"
                     })
 
+        # (5) 개설 여부(M/N): 해당 학기 편성이 없는데 O인 경우만
+        sem1_cols = [7, 9, 11]   # G, I, K (1·2·3학년 1학기)
+        sem2_cols = [8, 10, 12]  # H, J, L (1·2·3학년 2학기)
+        open1_col, open2_col = 13, 14  # M, N
+        for rr in range(first_row, last_row + 1):
+            if rr in exempt_rows:
+                continue
+            course_raw, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, course_col)
+            if course_raw is None or str(course_raw).strip() == "":
+                continue
+            if is_error_token(course_raw):
+                continue
+
+            check_row = _all_grades_semester_check_row(
+                ws_all_v, ws_all_f, merge_all, rr, course_col=course_col, a_col=1
+            )
+            has_sem1 = _has_nonzero_semester_credit(
+                ws_all_v, ws_all_f, merge_all, check_row, sem1_cols
+            )
+            has_sem2 = _has_nonzero_semester_credit(
+                ws_all_v, ws_all_f, merge_all, check_row, sem2_cols
+            )
+
+            open1, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, open1_col)
+            open2, _, _ = get_value_with_merge(ws_all_v, ws_all_f, merge_all, rr, open2_col)
+
+            if _is_open_flag_o(open1) and not has_sem1:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": all_grades_sheet,
+                    "row": rr,
+                    "message": (
+                        "1학기 개설여부(M열)가 O이지만 "
+                        "1학기(G/I/K열)에 편성 학점이 없습니다."
+                    ),
+                })
+            if _is_open_flag_o(open2) and not has_sem2:
+                issues.append({
+                    "severity": "ERROR",
+                    "sheet": all_grades_sheet,
+                    "row": rr,
+                    "message": (
+                        "2학기 개설여부(N열)가 O이지만 "
+                        "2학기(H/J/L열)에 편성 학점이 없습니다."
+                    ),
+                })
+
 
 # 구 양식 → 신 양식 총계 행 표기 (공백 무시 비교용 old_norm)
 OUTDATED_FORM_LABELS = (
@@ -2334,6 +2829,9 @@ def run_checks(xlsx_path: str):
                 issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": "과목명(D열)에서 괄호 제거 후 이름이 비었습니다."})
                 continue
 
+            a_val, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, compare_col)
+            is_jeungbae_op = is_jeungbae_operating_cell(a_val)
+
             parts = split_bidirectional(course_norm)
             is_bidirectional = len(parts) >= 2
 
@@ -2405,8 +2903,8 @@ def run_checks(xlsx_path: str):
                                 sheet_subject_group_str = safe_strip(sheet_subject_group)
                                 hidden_subject_group_str = hidden_rec.get("subject_group", "")
                                     
-                                # '증배'가 포함된 경우 교과(군) 체크 제외
-                                if "증배" not in sheet_subject_group_str:
+                                # 증배운영 과목 또는 B열에 '증배'가 있으면 교과(군) 체크 제외
+                                if (not is_jeungbae_op) and "증배" not in sheet_subject_group_str:
                                     # 교과(군)이 비어있는 경우
                                     if not sheet_subject_group_str:
                                         issues.append({
@@ -2466,8 +2964,8 @@ def run_checks(xlsx_path: str):
                         sheet_subject_group_str = safe_strip(sheet_subject_group)
                         hidden_subject_group_str = hidden_rec.get("subject_group", "")
                             
-                        # '증배'가 포함된 경우 교과(군) 체크 제외
-                        if "증배" not in sheet_subject_group_str:
+                        # 증배운영 과목 또는 B열에 '증배'가 있으면 교과(군) 체크 제외
+                        if (not is_jeungbae_op) and "증배" not in sheet_subject_group_str:
                             # 교과(군)이 비어있는 경우
                             if not sheet_subject_group_str:
                                 issues.append({
@@ -2514,12 +3012,23 @@ def run_checks(xlsx_path: str):
                 grade_v, _, _ = get_value_with_merge(ws_v, ws_f, merge_lookup, rr, grading_col)
                 grade_s = safe_strip(grade_v)
                 if grade_s == "":
-                    issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"성적처리 유형(O{rr})이 비어 있습니다. (지침: {hidden_rec['grading']})"})
+                    if is_jeungbae_op:
+                        issues.append({
+                            "severity": "CHECK",
+                            "sheet": sname,
+                            "row": rr,
+                            "message": f"증배운영 과목: 성적처리 유형(O{rr})이 비어 있습니다. 확인해주세요. (지침: {hidden_rec['grading']})",
+                        })
+                    else:
+                        issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"성적처리 유형(O{rr})이 비어 있습니다. (지침: {hidden_rec['grading']})"})
+                elif is_jeungbae_op and jeungbae_grading_is_allowed(grade_s, hidden_rec["grading"]):
+                    pass  # 지침 일치, 또는 석차등급O 지침에 석차등급X 허용
                 elif grade_s != hidden_rec["grading"]:
-                    # 과목명에 괄호가 있는 경우 CHECK로 처리
+                    # 증배운영·과목명 괄호(공동교육과정 등)는 확인만
                     has_parenthesis = "(" in str(course_raw) or ")" in str(course_raw)
-                    if has_parenthesis:
-                        issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"성적처리 유형 확인. 공동교육과정 등으로 인해 이상없으면 무시 (시트='{grade_s}' / 지침='{hidden_rec['grading']}')"})
+                    if is_jeungbae_op or has_parenthesis:
+                        prefix = "증배운영 과목: " if is_jeungbae_op else ""
+                        issues.append({"severity": "CHECK", "sheet": sname, "row": rr, "message": f"{prefix}성적처리 유형 확인. 공동교육과정 등으로 인해 이상없으면 무시 (시트='{grade_s}' / 지침='{hidden_rec['grading']}')"})
                     else:
                         issues.append({"severity": "ERROR", "sheet": sname, "row": rr, "message": f"성적처리 유형 불일치: 시트='{grade_s}' / 지침='{hidden_rec['grading']}'"})
 
@@ -3290,6 +3799,24 @@ def run_checks(xlsx_path: str):
     # =========================
     # (9) 전학년 시트 검증
     # =========================
+    all_grades_sheet = summary.get("all_grades_sheet")
+    if all_grades_sheet and all_grades_sheet in wb_v.sheetnames and all_grades_sheet in wb_f.sheetnames:
+        try:
+            ws_all_v = wb_v[all_grades_sheet]
+            ws_all_f = wb_f[all_grades_sheet]
+            merge_all = build_merged_lookup(ws_all_f)
+            check_all_grades_course_names_against_guideline(
+                ws_all_v, ws_all_f, merge_all, all_grades_sheet, issues,
+                hidden, hidden_list_norm, vocational_courses, new_courses,
+            )
+        except Exception as e:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": all_grades_sheet,
+                "row": "-",
+                "message": f"전학년 시트 과목명(지침) 검사 중 예외가 발생했습니다: {e}",
+            })
+
     try:
         check_all_grades_sheet(wb_v, wb_f, targets, issues)
     except Exception as e:
@@ -3299,6 +3826,25 @@ def run_checks(xlsx_path: str):
             "row": "-",
             "message": f"전학년 시트 검사 중 예외가 발생했습니다: {e}"
         })
+
+    # 전학년 시트 증배운영 과목: 교차 대조 없이 유형·기본학점·학기편성·성적처리(확인)
+    all_grades_sheet = summary.get("all_grades_sheet")
+    if all_grades_sheet and all_grades_sheet in wb_v.sheetnames and all_grades_sheet in wb_f.sheetnames:
+        try:
+            ws_all_v = wb_v[all_grades_sheet]
+            ws_all_f = wb_f[all_grades_sheet]
+            merge_all = build_merged_lookup(ws_all_f)
+            check_jeungbae_operating_courses_on_sheet(
+                ws_all_v, ws_all_f, merge_all, all_grades_sheet, issues,
+                hidden, hidden_list_norm, vocational_courses, new_courses,
+            )
+        except Exception as e:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": all_grades_sheet,
+                "row": "-",
+                "message": f"전학년 시트 증배운영 과목 검사 중 예외가 발생했습니다: {e}",
+            })
 
     # 전학년 시트 선택군 가로줄 검사
     all_grades_sheet = summary.get("all_grades_sheet")
@@ -3816,7 +4362,7 @@ class App:
             if tab_name in sheets_with_bidirectional:
                 notices.append("교차이수과목의 경우 ↔ 왼쪽 과목을 윗줄, 오른쪽 과목을 아랫줄으로 판단합니다.")
             if tab_name == all_grades_sheet and all_grades_sheet:
-                notices.append("개설 여부는 프로그램 상 확인 절차가 따로 없습니다. 선택군은 학년별로 다르게 정리해주세요.")
+                notices.append("개설 여부(M/N)는 학기 편성이 없는데 O가 입력된 경우만 오류로 표시합니다. 선택군은 학년별로 다르게 정리해주세요.")
 
             if notices:
                 self._w(tab_name, "[안내]\n", "HEADER")

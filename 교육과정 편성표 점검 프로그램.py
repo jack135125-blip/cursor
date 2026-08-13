@@ -31,7 +31,6 @@
 import os
 import re
 import difflib
-import webbrowser
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from tkinter.scrolledtext import ScrolledText
@@ -3487,22 +3486,6 @@ class App:
             text="프로그램이 잘못 판단할 수 있으니, 확인했을 때 이상이 없다면 오류를 무시하셔도 됩니다.",
             style="Muted.TLabel"
         ).pack(anchor="w")
-
-        download_btn = tk.Button(
-            text_frame,
-            text="편성표 양식 다운로드",
-            command=lambda: webbrowser.open("https://drive.google.com/drive/folders/1wvdV4VQD7kUD7eVEvypPf39LDWZLxfze?usp=sharing"),
-            bg=self.colors["accent"],
-            fg="white",
-            bd=0,
-            activebackground=self.colors["accent"],
-            activeforeground="white",
-            padx=12,
-            pady=6,
-            font=("Malgun Gothic", 10),
-            cursor="hand2"
-        )
-        download_btn.pack(side="right", padx=(10, 0))
 
         body = ttk.Frame(self.root, padding=(18, 8, 18, 18))
         body.pack(fill="both", expand=True)

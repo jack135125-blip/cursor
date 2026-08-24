@@ -10,6 +10,7 @@
 2) 2025/2026/2027 입학생 시트 (동일 양식):
    - 과목명(D열) 셀에 채우기 색(흰색 제외)이 있으면 그 행은 "모든 검사" 제외
    - 병합 셀인 경우, 해당 D셀의 병합 top-left 셀의 색도 함께 판단(엑셀에서 보이는 색을 더 정확히 반영)
+   - A열(구분) 병합에 '증배운영'이 있으면 경고(증배운영 과목은 전학년 시트에만 입력)
 3) 운영학점(F) vs 학기 편성(G~L):
    - 학년 쌍(G/H, I/J, K/L)에서 둘 다(0 제외) 입력되면 서로 같은 값이어야 함
    - 한쪽만 입력(또는 2/0)도 허용. 0이 아닌 학기 값은 운영학점과 일치해야 함
@@ -31,6 +32,9 @@
    - 1학기(G/I/K) 편성 없이 M열이 O이거나, 2학기(H/J/L) 편성 없이 N열이 O이면 오류
    - 편성되어 있는데 X이거나, 미편성에 X인 경우는 검사하지 않음
 10) 전학년 시트 과목명: 지침(숨김)과 다르면 경고. 기존 교차 비교·증배 점검은 그대로 진행
+11) 입학생 시트 편성 학점 수(이수 학점 총계):
+   - 학기(G~L)별 29~33 권장 범위 벗어나면 경고
+   - 전체 합계(M열)가 192가 아니면 경고
 
 사용 방법
 1) pip install openpyxl
@@ -67,6 +71,11 @@ TARGET_YEARS = (2027, 2026, 2025)
 ALL_GRADES_YEAR = 2027
 ALL_GRADES_LABEL = f"{ALL_GRADES_YEAR} 전학년"
 BASE_YEAR_FOR_GRADE = 2028  # grade = BASE_YEAR_FOR_GRADE - year
+
+# 입학생 시트 편성 학점 수(이수 학점 총계) 권장/기준
+RECOMMENDED_SEMESTER_CREDITS_MIN = 29
+RECOMMENDED_SEMESTER_CREDITS_MAX = 33
+REQUIRED_TOTAL_CREDITS = 192
 
 # 구글 스프레드시트 URL
 GOOGLE_SHEET_ID = "1BaTm1J34hep9QV8fswwPfcfCZX-geGtanLwX9BkhCyU"
@@ -277,6 +286,51 @@ def is_jeungbae_operating_cell(a_val) -> bool:
     if a_val is None:
         return False
     return "증배운영" in str(a_val).replace(" ", "").replace("\n", "")
+
+
+def check_jeungbae_forbidden_on_incoming_sheet(ws_v, ws_f, sname, issues):
+    """
+    입학생 시트 A열(구분) 병합에 '증배운영'이 있으면 안 된다.
+    증배운영 과목은 전학년 시트에만 입력한다. (시트당 경고 1건)
+    """
+    hits = []  # (min_row, max_row, label)
+    seen_tops = set()
+    for mr in ws_f.merged_cells.ranges:
+        if mr.min_col != 1:
+            continue
+        top = mr.min_row
+        if top in seen_tops:
+            continue
+        v = ws_v.cell(top, 1).value
+        if v is None:
+            v = ws_f.cell(top, 1).value
+        if not is_jeungbae_operating_cell(v):
+            continue
+        seen_tops.add(top)
+        label = safe_strip(v).replace("\n", " ") if v is not None else ""
+        hits.append((top, mr.max_row, label))
+
+    if not hits:
+        return
+
+    hits.sort(key=lambda x: x[0])
+    lines = [
+        "증배운영 과목은 전학년 시트에만 입력합니다.",
+        "입학생 시트의 A열(구분) 병합에 '증배운영' 표기가 있습니다. 해당 칸·과목을 전학년 시트로 옮겨 주세요.",
+        "",
+        "[해당 구간]",
+    ]
+    for r1, r2, label in hits:
+        span = f"{r1}행" if r1 == r2 else f"{r1}~{r2}행"
+        detail = f"'{label}'" if label else "(표기 확인)"
+        lines.append(f"  • {detail} ({span})")
+
+    issues.append({
+        "severity": "WARNING",
+        "sheet": sname,
+        "row": "-",
+        "message": "\n".join(lines),
+    })
 
 
 def _norm_grading_text(text) -> str:
@@ -2712,6 +2766,17 @@ def run_checks(xlsx_path: str):
                 "message": f"선택군 가로줄(테두리) 검사 중 예외가 발생했습니다: {e}",
             })
 
+        # 입학생 시트 A열 병합에 '증배운영'이 있으면 안 됨 (전학년 시트 전용)
+        try:
+            check_jeungbae_forbidden_on_incoming_sheet(ws_v, ws_f, sname, issues)
+        except Exception as e:
+            issues.append({
+                "severity": "ERROR",
+                "sheet": sname,
+                "row": "-",
+                "message": f"입학생 시트 증배운영 표기 검사 중 예외가 발생했습니다: {e}",
+            })
+
         first_row = 5
         subject_group_col = 2  # B: 교과(군)
         course_col = 4  # D
@@ -3795,6 +3860,76 @@ def run_checks(xlsx_path: str):
                         "row": final_row,
                         "message": f"편성 학점 수 {total_col_name}열 합계 오류: 셀값={actual_final_num:g}, 기대값(총교과+창의적)={expected_final_total:g}"
                     })
+
+        # 편성 학점 수(이수 학점 총계): 학기당 29~33 권장, 전체 192
+        if "편성학점수" in total_rows:
+            final_row = total_rows["편성학점수"]
+            out_of_range = []
+            missing_sem = []
+            for col_letter in sem_cols:
+                actual_val, _, _ = get_value_with_merge(
+                    ws_v, ws_f, merge_lookup, final_row, col_letter
+                )
+                actual_num = to_number(actual_val)
+                col_name = get_column_name(col_letter)
+                if actual_num is None:
+                    missing_sem.append(col_name)
+                elif (
+                    actual_num < RECOMMENDED_SEMESTER_CREDITS_MIN
+                    or actual_num > RECOMMENDED_SEMESTER_CREDITS_MAX
+                ):
+                    out_of_range.append(f"{col_name}={format_number(actual_num)}")
+
+            if missing_sem:
+                issues.append({
+                    "severity": "WARNING",
+                    "sheet": sname,
+                    "row": final_row,
+                    "message": (
+                        "편성 학점 수(이수 학점 총계) 학기 학점이 비어 있습니다. "
+                        f"학기당 {RECOMMENDED_SEMESTER_CREDITS_MIN}~{RECOMMENDED_SEMESTER_CREDITS_MAX}학점 편성을 권장합니다. "
+                        f"(비어 있음: {', '.join(missing_sem)})"
+                    ),
+                })
+            if out_of_range:
+                issues.append({
+                    "severity": "WARNING",
+                    "sheet": sname,
+                    "row": final_row,
+                    "message": (
+                        f"편성 학점 수(이수 학점 총계)는 학기당 "
+                        f"{RECOMMENDED_SEMESTER_CREDITS_MIN}~{RECOMMENDED_SEMESTER_CREDITS_MAX}학점을 권장합니다. "
+                        f"(권장 범위 밖: {', '.join(out_of_range)})"
+                    ),
+                })
+
+            total_col = total_cols[0]
+            actual_final, _, _ = get_value_with_merge(
+                ws_v, ws_f, merge_lookup, final_row, total_col
+            )
+            actual_final_num = to_number(actual_final)
+            total_col_name = chr(64 + total_col)
+            if actual_final_num is None:
+                issues.append({
+                    "severity": "WARNING",
+                    "sheet": sname,
+                    "row": final_row,
+                    "message": (
+                        f"편성 학점 수(이수 학점 총계) {total_col_name}열 전체 학점이 비어 있습니다. "
+                        f"전체 학점은 {REQUIRED_TOTAL_CREDITS}학점으로 맞춰 주세요."
+                    ),
+                })
+            elif abs(actual_final_num - REQUIRED_TOTAL_CREDITS) > EPS:
+                issues.append({
+                    "severity": "WARNING",
+                    "sheet": sname,
+                    "row": final_row,
+                    "message": (
+                        f"편성 학점 수(이수 학점 총계) {total_col_name}열 전체 학점이 "
+                        f"{REQUIRED_TOTAL_CREDITS}학점이 아닙니다. "
+                        f"(셀값={format_number(actual_final_num)}, 기준={REQUIRED_TOTAL_CREDITS})"
+                    ),
+                })
 
     # =========================
     # (9) 전학년 시트 검증
